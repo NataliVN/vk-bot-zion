@@ -46,46 +46,75 @@ def main():
     longpoll = VkBotLongPoll(session, settings.vk_group_id)
 
     for event in longpoll.listen():
-        if event.type != VkBotEventType.MESSAGE_NEW:
-            continue
+        if event.type == VkBotEventType.MESSAGE_NEW:
+            msg = getattr(event.object, "message", None)
+            if not msg:
+                continue
 
-        msg = event.object.message
-        peer_id = msg["peer_id"]
-        user_id = msg["from_id"]
-        text = (msg.get("text") or "").strip()
+            peer_id = msg.get("peer_id")
+            user_id = msg.get("from_id")
+            text = (msg.get("text") or "").strip()
 
-        if text == "/start":
-            response, keyboard = dialog.start(peer_id, user_id)
+            if text == "/start":
+                response, keyboard = dialog.start(peer_id, user_id)
+                vk_client.send_message(peer_id, response, keyboard)
+                continue
+
+            attachments = msg.get("attachments") or []
+            if attachments:
+                photo_paths: list[str] = []
+                for attachment in attachments:
+                    if attachment.get("type") == "photo":
+                        photo = attachment.get("photo") or {}
+                        sizes = photo.get("sizes") or []
+                        if not sizes:
+                            continue
+                        best = max(sizes, key=lambda x: x.get("width", 0) * x.get("height", 0))
+                        url = best.get("url")
+                        if not url:
+                            continue
+                        path = dialog.save_incoming_photo(url)
+                        photo_paths.append(path)
+
+                response, keyboard = dialog.add_photo_paths(peer_id, user_id, photo_paths)
+                vk_client.send_message(peer_id, response, keyboard)
+                continue
+
+            payload_raw = msg.get("payload")
+            if payload_raw:
+                try:
+                    payload = json.loads(payload_raw)
+                except Exception:
+                    payload = {}
+                response, keyboard = dialog.handle_button(peer_id, user_id, payload)
+                vk_client.send_message(peer_id, response, keyboard)
+                continue
+
+            response, keyboard = dialog.handle_text(peer_id, user_id, text)
             vk_client.send_message(peer_id, response, keyboard)
             continue
 
-        if msg.get("attachments"):
-            photo_paths: list[str] = []
-            for attachment in msg["attachments"]:
-                if attachment.get("type") == "photo":
-                    photo = attachment["photo"]
-                    sizes = photo.get("sizes", [])
-                    if not sizes:
-                        continue
-                    best = max(sizes, key=lambda x: x.get("width", 0) * x.get("height", 0))
-                    path = dialog.save_incoming_photo(best["url"])
-                    photo_paths.append(path)
+        if event.type == VkBotEventType.MESSAGE_EVENT:
+            msg_event = event.object
+            if not msg_event:
+                continue
 
-            response, keyboard = dialog.add_photo_paths(peer_id, user_id, photo_paths)
-            vk_client.send_message(peer_id, response, keyboard)
-            continue
+            peer_id = getattr(msg_event, "peer_id", None)
+            user_id = getattr(msg_event, "user_id", None)
+            event_id = getattr(msg_event, "event_id", None)
+            payload_raw = getattr(msg_event, "payload", None)
 
-        if msg.get("payload"):
+            if peer_id is None or user_id is None or event_id is None:
+                continue
+
             try:
-                payload = json.loads(msg["payload"])
+                payload = json.loads(payload_raw) if payload_raw else {}
             except Exception:
                 payload = {}
-            response, keyboard = dialog.handle_button(peer_id, user_id, payload)
-            vk_client.send_message(peer_id, response, keyboard)
-            continue
 
-        response, keyboard = dialog.handle_text(peer_id, user_id, text)
-        vk_client.send_message(peer_id, response, keyboard)
+            response, keyboard = dialog.handle_button(peer_id, user_id, payload)
+            vk_client.answer_message_event(event_id, user_id, peer_id, payload)
+            vk_client.send_message(peer_id, response, keyboard)
 
 if __name__ == "__main__":
     main()
