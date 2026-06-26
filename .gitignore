@@ -4,7 +4,7 @@ vk_test*.py
 vk_token*.py
 *.py[codz]
 *$py.class
-
+old version/
 # C extensions
 *.so
 

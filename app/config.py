@@ -1,38 +1,28 @@
-from dataclasses import dataclass
+from __future__ import annotations
+
 import os
-from dotenv import dotenv_values
+from dataclasses import dataclass, field
 
-# Загружаем переменные из .env (если есть) и системные переменные
-env = dotenv_values(".env")
+from dotenv import load_dotenv
 
-
-def _get(name: str, default: str | None = None) -> str:
-    value = env.get(name, os.getenv(name, default or ""))
-    if value is None or str(value).strip() == "":
-        if default is not None:
-            return default
-        raise ValueError(f"Missing required env var: {name}")
-    return str(value)
+load_dotenv()
 
 
-@dataclass(frozen=True)
+def _csv_ints(value: str | None) -> list[int]:
+    if not value:
+        return []
+    return [int(x.strip()) for x in value.split(",") if x.strip()]
+
+
+@dataclass
 class Settings:
-    vk_group_token: str = _get("VK_GROUP_TOKEN")
-
-    vk_group_id: int = int(_get("VK_GROUP_ID"))
-    vk_api_version: str = _get("VK_API_VERSION", "5.131")
-    #vk_user_token: str = _get("VK_USER_TOKEN", "")
-
-    database_url: str = _get("DATABASE_URL", "sqlite:///app.db")
-    upload_dir: str = _get("UPLOAD_DIR", "uploads")
-    log_dir: str = _get("LOG_DIR", "logs")
-
-    # ✅ Список ID администраторов (разрешённых пользователей)
-    admin_user_ids: frozenset[int] = frozenset(
-        int(x.strip()) for x in _get("ADMIN_USER_IDS", "").split(",") if x.strip()
-    )
-
-    tz: str = _get("TZ", "Europe/Moscow")
+    vk_group_token: str = os.getenv("VK_GROUP_TOKEN", "")
+    vk_user_token: str = os.getenv("VK_USER_TOKEN", "")
+    vk_api_version: str = os.getenv("VK_API_VERSION", "5.199")
+    vk_group_id: int = int(os.getenv("VK_GROUP_ID", "0"))
+    operator_user_id: int = int(os.getenv("OPERATOR_USER_ID", "0"))
+    admin_user_ids: list[int] = field(default_factory=lambda: _csv_ints(os.getenv("ADMIN_USER_IDS")))
+    upload_dir: str = os.getenv("UPLOAD_DIR", "media")
 
 
 settings = Settings()

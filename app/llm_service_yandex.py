@@ -4,10 +4,9 @@ import logging
 from pathlib import Path
 from typing import cast
 
-from openai import OpenAI
-from openai.types.chat import ChatCompletionMessageParam
-
 import dotenv
+import openai
+from openai.types.chat import ChatCompletionMessageParam
 
 logger = logging.getLogger(__name__)
 
@@ -23,25 +22,31 @@ class LLMService:
     def __init__(
         self,
         prompt_file: str = "prompts/post_prompt.txt",
-        model_name: str = "gemma3:1b",
+        model_name: str = "yandexgpt-lite",
         temperature: float = 0.3,
         max_tokens: int = 700,
     ):
         env = _load_env()
-        self.ollama_base_url = env.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        self.model_name = env.get("OLLAMA_MODEL", model_name)
+        self.ya_api_key = env.get("YA_API_KEY")
+        self.ya_folder_id = env.get("YA_FOLDER_ID")
+
+        if not self.ya_api_key:
+            raise KeyError("Переменная YA_API_KEY не найдена в .env.")
+        if not self.ya_folder_id:
+            raise KeyError("Переменная YA_FOLDER_ID не найдена в .env.")
 
         prompt_path = Path(prompt_file)
         if not prompt_path.exists():
             raise FileNotFoundError(f"Файл промпта не найден: {prompt_file}")
 
         self.template = prompt_path.read_text(encoding="utf-8").strip()
+        self.model = f"gpt://{self.ya_folder_id}/{model_name}/latest"
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        self.client = OpenAI(
-            base_url=self.ollama_base_url,
-            api_key="ollama",
+        self.client = openai.OpenAI(
+            api_key=self.ya_api_key,
+            base_url="https://llm.api.cloud.yandex.net/v1",
         )
 
     def build_prompt(
@@ -69,7 +74,7 @@ class LLMService:
             *history,
         ]
         response = self.client.chat.completions.create(
-            model=self.model_name,
+            model=self.model,
             messages=messages,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
