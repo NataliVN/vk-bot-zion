@@ -5,14 +5,14 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-import vk_api
+from vk_api import VkApi
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 
 from app.config import settings
-from app.storage import init_db
-from app.vk_client import VKClient
 from app.dialog import DialogManager
-from model import chat_with_llm
+
+logger = logging.getLogger(__name__)
+
 
 def setup_logging():
     Path(settings.log_dir).mkdir(parents=True, exist_ok=True)
@@ -35,15 +35,25 @@ def setup_logging():
     root.addHandler(fh)
     root.addHandler(sh)
 
+
+def is_user_allowed(user_id: int) -> bool:
+    return user_id in settings.admin_user_ids
+
+
 def main():
     setup_logging()
-    init_db()
 
-    vk_client = VKClient()
-    dialog = DialogManager(vk_client=vk_client, chat_with_llm=chat_with_llm)
+    # ✅ Создаём сессию (VkApi) — это то, что нужно передать в DialogManager
+    vk_session = VkApi(token=settings.vk_group_token)
+    
+    # vk = vk_session.get_api()  # ❌ УБРАЛИ эту строку, чтобы не было путаницы типов
+    
+    longpoll = VkBotLongPoll(vk_session, settings.vk_group_id)
 
-    session = vk_api.VkApi(token=settings.vk_group_token)
-    longpoll = VkBotLongPoll(session, settings.vk_group_id)
+    # ✅ Передаём vk_session (тип VkApi) в DialogManager
+    dialog = DialogManager(vk_client=vk_session)
+
+    logger.info("���т запущен (VkBotLongPoll)")
 
     for event in longpoll.listen():
         if event.type == VkBotEventType.MESSAGE_NEW:
@@ -54,13 +64,47 @@ def main():
             peer_id = msg.get("peer_id")
             user_id = msg.get("from_id")
             text = (msg.get("text") or "").strip()
+            attachments = msg.get("attachments") or []
 
-            if text == "/start":
-                response, keyboard = dialog.start(peer_id, user_id)
-                vk_client.send_message(peer_id, response, keyboard)
+            if not is_user_allowed(user_id):
+                vk_session.method(
+                    "messages.send",
+                    {
+                        "peer_id": peer_id,
+                        "message": "У вас нет прав для использования этого бота.",
+                        "random_id": 0,
+                    },
+                )
                 continue
 
-            attachments = msg.get("attachments") or []
+            # --- Команды ---
+            if text == "/start":
+                response, keyboard = dialog.start(peer_id, user_id)
+                params = {
+                    "peer_id": peer_id,
+                    "message": response,
+                    "random_id": 0,
+                }
+                if keyboard:
+                    params["keyboard"] = keyboard
+
+                vk_session.method("messages.send", params)
+                continue
+
+            if text == "/skip":
+                response, keyboard = dialog.handle_text(peer_id, user_id, text)
+                params = {
+                    "peer_id": peer_id,
+                    "message": response,
+                    "random_id": 0,
+                }
+                if keyboard:
+                    params["keyboard"] = keyboard
+
+                vk_session.method("messages.send", params)
+                continue
+
+            # --- Вложения (фото) ---
             if attachments:
                 photo_paths: list[str] = []
                 for attachment in attachments:
@@ -76,45 +120,33 @@ def main():
                         path = dialog.save_incoming_photo(url)
                         photo_paths.append(path)
 
-                response, keyboard = dialog.add_photo_paths(peer_id, user_id, photo_paths)
-                vk_client.send_message(peer_id, response, keyboard)
+                if photo_paths:
+                    response, _ = dialog.add_photo_paths(peer_id, user_id, photo_paths)
+                    vk_session.method(
+                        "messages.send",
+                        {
+                            "peer_id": peer_id,
+                            "message": response,
+                            "random_id": 0,
+                        },
+                    )
                 continue
 
-            payload_raw = msg.get("payload")
-            if payload_raw:
-                try:
-                    payload = json.loads(payload_raw)
-                except Exception:
-                    payload = {}
-                response, keyboard = dialog.handle_button(peer_id, user_id, payload)
-                vk_client.send_message(peer_id, response, keyboard)
-                continue
-
+            # --- Обычный текст ---
             response, keyboard = dialog.handle_text(peer_id, user_id, text)
-            vk_client.send_message(peer_id, response, keyboard)
+            params = {
+                "peer_id": peer_id,
+                "message": response,
+                "random_id": 0,
+            }
+            if keyboard:
+                params["keyboard"] = keyboard
+
+            vk_session.method("messages.send", params)
             continue
+        else:
+            logger.debug(f"[SKIP] неподдерживаемый event.type: {event.type}")
 
-        if event.type == VkBotEventType.MESSAGE_EVENT:
-            msg_event = event.object
-            if not msg_event:
-                continue
-
-            peer_id = getattr(msg_event, "peer_id", None)
-            user_id = getattr(msg_event, "user_id", None)
-            event_id = getattr(msg_event, "event_id", None)
-            payload_raw = getattr(msg_event, "payload", None)
-
-            if peer_id is None or user_id is None or event_id is None:
-                continue
-
-            try:
-                payload = json.loads(payload_raw) if payload_raw else {}
-            except Exception:
-                payload = {}
-
-            response, keyboard = dialog.handle_button(peer_id, user_id, payload)
-            vk_client.answer_message_event(event_id, user_id, peer_id, payload)
-            vk_client.send_message(peer_id, response, keyboard)
 
 if __name__ == "__main__":
     main()

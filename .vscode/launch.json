@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "Run VK bot",
-      "type": "python",
+      "type": "debugpy",
       "request": "launch",
       "module": "app.bot",
       "cwd": "${workspaceFolder}",

@@ -1,227 +1,334 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-import uuid
-
-from app.storage import get_session, Draft, DraftPhoto
+import vk_api
+import requests
+from typing import Any, Optional
 from app.llm_service import generate_post
-from app.vk_keyboard import moderation_keyboard, back_keyboard
+
+logger = logging.getLogger(__name__)
 from app.config import settings
 
+
 @dataclass
-class UserState:
-    step: str = "start"
-    draft_id: int | None = None
+class Draft:
+    vk_user_id: int
+    peer_id: int
+    child_name: str = ""
+    child_age: str = ""
+    event_date: str = ""
+    fact: str = ""
+    photos_count: int = 0
+    video_count: int = 0
+    publish_at_text: str = ""
+    publish_at_ts: int = 0
+    post_text: str = ""
+    photos: list[str] = field(default_factory=list)
+    videos: list[str] = field(default_factory=list)
+    status: str = "awaiting_data"
+
 
 class DialogManager:
-    def __init__(self, vk_client, chat_with_llm):
-        self.vk = vk_client
-        self.chat_with_llm = chat_with_llm
-        self.states: dict[int, UserState] = {}
+    def __init__(self, vk_client: vk_api.VkApi):
+        self.vk_client = vk_client
+        self.group_api = vk_client.get_api()
 
-    def get_state(self, peer_id: int) -> UserState:
-        return self.states.setdefault(peer_id, UserState())
+        self.drafts: dict[int, Draft] = {}
 
-    def is_allowed(self, user_id: int) -> bool:
-        return bool(settings.admin_user_ids) and user_id in settings.admin_user_ids
-
-    def handle_public_user(self, peer_id: int, user_id: int, text: str) -> tuple[str, str | None]:
-        return "Спасибо, ваше сообщение принято. Оператор ответит вам лично.", None
-
-    def start(self, peer_id: int, vk_user_id: int) -> tuple[str, str | None]:
-        if not self.is_allowed(vk_user_id):
-            return self.handle_public_user(peer_id, vk_user_id, "/start")
-
-        session = get_session()
-        draft = Draft(vk_user_id=vk_user_id, peer_id=peer_id, status="await_photos")
-        session.add(draft)
-        session.commit()
-        session.refresh(draft)
-        self.get_state(peer_id).draft_id = draft.id
-        self.get_state(peer_id).step = "await_photos"
-        session.close()
-        return "Пришлите несколько фото с праздника.", None
+    def _get_draft(self, peer_id: int, user_id: int) -> Draft:
+        if peer_id not in self.drafts:
+            self.drafts[peer_id] = Draft(vk_user_id=user_id, peer_id=peer_id)
+        return self.drafts[peer_id]
 
     def save_incoming_photo(self, url: str) -> str:
-        Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
-        filename = f"{uuid.uuid4().hex}.jpg"
-        path = str(Path(settings.upload_dir) / filename)
-        self.vk.download_photo(url, path)
-        return path
+        filename = url.split("?")[0].split("/")[-1] or "photo.jpg"
+        path = Path("media") / filename
+        Path("media").mkdir(parents=True, exist_ok=True)
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        path.write_bytes(resp.content)
+        return str(path)
 
-    def add_photo_paths(self, peer_id: int, user_id: int, paths: list[str]) -> tuple[str, str | None]:
-        if not self.is_allowed(user_id):
-            return self.handle_public_user(peer_id, user_id, "photo")
-
-        state = self.get_state(peer_id)
-        if state.draft_id is None:
-            return "Сначала нажмите /start.", None
-
-        session = get_session()
-        draft = session.get(Draft, state.draft_id)
-        if not draft:
-            session.close()
-            return "Черновик не найден. Начните заново.", None
-
-        for p in paths:
-            session.add(DraftPhoto(draft_id=draft.id, local_path=p))
-        draft.status = "await_name"
-        session.commit()
-        session.close()
-        state.step = "await_name"
-        return "Фото приняты. Теперь отправьте имя ребенка.", None
-
-    def render_draft(self, draft: Draft) -> str:
-        photos_count = len(draft.photos)
+    # ✅ Шаг 1: /start
+    def start(self, peer_id: int, user_id: int):
+        self._get_draft(peer_id, user_id)
         return (
-            f"Черновик поста:\n\n{draft.post_text}\n\n"
-            f"Имя: {draft.child_name}\n"
-            f"Возраст: {draft.child_age}\n"
-            f"Дата мероприятия: {draft.event_date}\n"
-            f"Фото: {photos_count}\n"
+            "Привет! Пришли одним сообщением:\n"
+            "1) имя ребенка\n"
+            "2) возраст\n"
+            "3) дата мероприятия\n"
+            "4) интересный факт (можно пропустить)\n\n"
+            "Пример:\nАнна\n12\n25.06.2026\nМного гостей",
+            None,
         )
 
-    def handle_text(self, peer_id: int, user_id: int, text: str) -> tuple[str, str | None]:
-        if not self.is_allowed(user_id):
-            return self.handle_public_user(peer_id, user_id, text)
+    # ✅ Шаг 2: сбор данных → генерация поста
+    def handle_text(self, peer_id: int, user_id: int, text: str):
+        draft = self._get_draft(peer_id, user_id)
+        text = (text or "").strip()
 
-        state = self.get_state(peer_id)
-        if state.draft_id is None:
-            return "Сначала нажмите /start.", None
+        if draft.status == "awaiting_data":
+            lines = [p.strip() for p in text.splitlines() if p.strip()]
+            if len(lines) < 3:
+                return (
+                    "Нужно хотя бы 3 строки:\n"
+                    "1) имя ребенка\n"
+                    "2) возраст\n"
+                    "3) дата мероприятия\n"
+                    "(остальные можно опустить)",
+                    None,
+                )
 
-        session = get_session()
-        draft = session.get(Draft, state.draft_id)
-        if not draft:
-            session.close()
-            return "Черновик не найден.", None
+            draft.child_name = lines[0]
+            draft.child_age = lines[1]
+            draft.event_date = lines[2]
 
-        if state.step == "await_name":
-            draft.child_name = text
-            draft.status = "await_age"
-            state.step = "await_age"
-            session.commit()
-            session.close()
-            return "Теперь отправьте возраст ребенка.", None
+            if len(lines) >= 4:
+                draft.fact = lines[3]
 
-        if state.step == "await_age":
             try:
-                draft.child_age = int(text)
-            except ValueError:
-                session.close()
-                return "Возраст должен быть числом.", None
-            draft.status = "await_event_date"
-            state.step = "await_event_date"
-            session.commit()
-            session.close()
-            return "Теперь отправьте дату проведения мероприятия.", None
+                draft.post_text = generate_post(
+                    child_name=draft.child_name,
+                    child_age=draft.child_age,
+                    event_date=draft.event_date,
+                    fact=draft.fact,
+                    photos_count=draft.photos_count,
+                )
+            except Exception as e:
+                logger.exception("LLM error")
+                return f"Ошибка генерации поста: {e}. Попробуй еще раз.", None
 
-        if state.step == "await_event_date":
-            draft.event_date = text
-            draft.status = "await_fact"
-            state.step = "await_fact"
-            session.commit()
-            session.close()
-            return "Теперь отправьте интересный факт.", None
-
-        if state.step == "await_fact":
-            draft.fact = text
-            photos_count = len(draft.photos)
-            draft.post_text = generate_post(
-                draft.child_name,
-                draft.child_age or 0,
-                draft.event_date,
-                draft.fact,
-                photos_count,
-                self.chat_with_llm,
-            )
-            draft.status = "await_review"
-            state.step = "await_review"
-            session.commit()
-            out = self.render_draft(draft)
-            session.close()
-            return out, moderation_keyboard()
-
-        if state.step == "await_edit":
-            draft.post_text = text
-            draft.status = "await_publish_date"
-            state.step = "await_publish_date"
-            session.commit()
-            session.close()
-            return "Текст обновлен. Теперь отправьте дату и время публикации в формате YYYY-MM-DD HH:MM.", None
-
-        if state.step == "await_publish_date":
-            try:
-                publish_dt = datetime.strptime(text, "%Y-%m-%d %H:%M")
-            except ValueError:
-                session.close()
-                return "Неверный формат даты. Используйте YYYY-MM-DD HH:MM.", None
-
-            photo_paths = [p.local_path for p in draft.photos]
-            attachments = self.vk.upload_wall_photos(photo_paths) if photo_paths else []
-            result = self.vk.schedule_wall_post(
-                message=draft.post_text,
-                attachments=attachments,
-                publish_date=int(publish_dt.timestamp()),
+            draft.status = "awaiting_confirm"
+            return (
+                "Черновик готов:\n\n"
+                f"{draft.post_text}\n\n"
+                "Напиши:\n"
+                "✅ `/confirm` — перейдем к загрузке фото/видео\n"
+                "✏️ `/edit` — редактировать текст",
+                None,
             )
 
-            draft.publish_at = publish_dt
-            draft.vk_post_id = result.get("post_id")
-            draft.status = "scheduled"
-            session.commit()
-            session.close()
-            state.step = "scheduled"
-            return f"Пост запланирован в VK. ID записи: {result.get('post_id')}", None
+        if draft.status == "awaiting_confirm":
+            if text == "/confirm":
+                draft.status = "awaiting_photos"
+                return (
+                    "Понял. Теперь пришлите фото и видео (до 10 штук). "
+                    "Если не нужно — `/skip`.",
+                    None,
+                )
+            if text == "/edit":
+                draft.status = "awaiting_edit"
+                return (
+                    "Хорошо. Напиши, что нужно изменить в тексте. "
+                    "Я обновлю пост и отвечу вам.",
+                    None,
+                )
+            return "Нажмите `/confirm` для подтверждения или `/edit` для редактирования.", None
 
-        session.close()
-        return "Команда не распознана.", None
+        if draft.status == "awaiting_edit":
+            draft.fact = text if text else draft.fact
+            try:
+                draft.post_text = generate_post(
+                    child_name=draft.child_name,
+                    child_age=draft.child_age,
+                    event_date=draft.event_date,
+                    fact=draft.fact,
+                    photos_count=draft.photos_count,
+                )
+            except Exception as e:
+                logger.exception("LLM error during edit")
+                return f"Ошибка генерации поста: {e}. Попробуй еще раз.", None
 
-    def handle_button(self, peer_id: int, user_id: int, payload: dict) -> tuple[str, str | None]:
-        if not self.is_allowed(user_id):
-            return self.handle_public_user(peer_id, user_id, "button")
+            draft.status = "awaiting_confirm"
+            return (
+                "Текст обновлён:\n\n"
+                f"{draft.post_text}\n\n"
+                "Напиши:\n"
+                "✅ `/confirm` — перейдем к загрузке фото/видео\n"
+                "✏️ `/edit` — редактировать текст",
+                None,
+            )
 
-        action = payload.get("action")
-        state = self.get_state(peer_id)
+        if draft.status == "awaiting_photos":
+            if text == "/skip":
+                draft.status = "awaiting_publish_time"
+                return "Ок. Пропущено. Теперь напиши дату и время публикации (например: 25.06.2026 18:30).", None
+            return "Чтобы продолжить, отправь /skip (пропустить).", None
 
-        session = get_session()
-        draft = session.get(Draft, state.draft_id) if state.draft_id else None
-        if not draft:
-            session.close()
-            return "Черновик не найден.", None
+        if draft.status == "awaiting_publish_time":
+            return self._set_publish_time(draft, text)
 
-        if action == "confirm":
-            state.step = "await_publish_date"
-            draft.status = "await_publish_date"
-            session.commit()
-            session.close()
-            return "Отправьте дату и время публикации в формате YYYY-MM-DD HH:MM.", back_keyboard()
+        return "Напиши /start, чтобы начать заново.", None
 
-        if action == "edit":
-            state.step = "await_edit"
-            draft.status = "editing"
-            session.commit()
-            session.close()
-            return "Отправьте новый вариант текста.", back_keyboard()
+    def _set_publish_time(self, draft: Draft, text: str):
+        for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y %H.%M", "%d-%m-%Y %H:%M"):
+            try:
+                dt = datetime.strptime(text.strip(), fmt)
+                publish_at_text = text.strip()
+                publish_at_ts = int(dt.timestamp())
+                break
+            except ValueError:
+                continue
+        else:
+            return "Укажи дату и время в формате: 25.06.2026 18:30", None
 
-        if action == "publish_date":
-            state.step = "await_publish_date"
-            draft.status = "await_publish_date"
-            session.commit()
-            session.close()
-            return "Отправьте дату и время публикации в формате YYYY-MM-DD HH:MM.", back_keyboard()
+        draft.publish_at_text = publish_at_text
+        draft.publish_at_ts = publish_at_ts
 
-        if action == "show_draft":
-            out = self.render_draft(draft)
-            session.close()
-            return out, moderation_keyboard()
+        try:
+            post_id = self._schedule_post(draft)
+        except Exception as e:
+            logger.exception("Failed to schedule post")
+            return f"Не удалось отправить пост в отложенные: {e}", None
 
-        if action == "back":
-            state.step = "await_review"
-            draft.status = "await_review"
-            out = self.render_draft(draft)
-            session.close()
-            return out, moderation_keyboard()
+        draft.status = "scheduled"
+        return (
+            f"✅ Пост отправлен в отложенную публикацию на {draft.publish_at_text}.\n"
+            f"ID: {post_id}",
+            None,
+        )
 
-        session.close()
-        return "Кнопка не распознана.", None
+    def _schedule_post(self, draft: Draft):
+        attachments = []
+
+        # 📷 Фото
+        for path in draft.photos[:10]:
+            try:
+                vk_attachment = self._upload_photo_group_token(path)
+                attachments.append(vk_attachment)
+            except Exception as e:
+                logger.warning(f"Failed to upload photo {path}: {e}")
+
+        # 🎥 Видео
+        for path in draft.videos[:10]:
+            try:
+                vk_attachment = self._upload_video_group_token(path)
+                if vk_attachment:
+                    attachments.append(vk_attachment)
+            except Exception as e:
+                logger.warning(f"Failed to upload video {path}: {e}")
+
+        group_id_int = int(settings.vk_group_id)
+        params = {
+            "owner_id": -abs(group_id_int),
+            "from_group": 1,
+            "message": draft.post_text,
+            "publish_date": draft.publish_at_ts,
+            "random_id": int.from_bytes(b"rand", "little"),
+        }
+        if attachments:
+            params["attachments"] = ",".join(attachments)
+
+        try:
+            response = self.group_api.wall.post(**params)
+            return response.get("post_id", 0)
+        except Exception as e:
+            logger.exception("wall.post error")
+            return 0
+
+    def _upload_photo_group_token(self, path: str) -> str:
+        """Загрузка фото через токен сообщества: photos.getUploadServer + photos.save"""
+        group_id_int = int(settings.vk_group_id)
+
+        upload_server = self.group_api.photos.getUploadServer(group_id=group_id_int)
+        upload_url = upload_server["upload_url"]
+
+        with open(path, "rb") as f:
+            resp = requests.post(upload_url, files={"photo": f}, timeout=120)
+        data = resp.json()
+
+        saved = self.group_api.photos.save(
+            group_id=group_id_int,
+            server=data["server"],
+            photo=data["photo"],
+            hash=data["hash"],
+        )
+
+        photo = saved[0]  # photos.save возвращает список
+        return f"photo{photo['owner_id']}_{photo['id']}"
+
+    def _upload_video_group_token(self, path: str) -> str:
+        """
+        Загрузка видео через токен сообщества.
+        Поток:
+          1. video.save → получаем upload_url
+          2. POST на upload_url → загружаем файл
+          3. Ждём обработки видео (цикл с проверкой video.get)
+          4. Формируем attachment: video{owner_id}_{id}
+        """
+        group_id_int = int(settings.vk_group_id)
+        file_size = Path(path).stat().st_size
+
+        logger.info(f"Начинаем загрузку видео: {path} (размер: {file_size} байт)")
+
+        # 1. Получаем URL для загрузки
+        upload_info = self.group_api.video.save(
+            name=Path(path).name,
+            description="Видео с праздника",
+            is_private=0,
+            group_id=group_id_int,
+            file_size=file_size,
+        )
+        upload_url = upload_info.get("upload_url")
+        if not upload_url:
+            logger.error("❌ Не получен upload_url для видео")
+            return ""
+
+        # 2. Загружаем файл на сервер VK
+        with open(path, "rb") as f:
+            resp = requests.post(upload_url, files={"video_file": f}, timeout=300)
+        resp.raise_for_status()
+        data = resp.json()
+
+        video_id = data.get("video_id")
+        owner_id = data.get("owner_id")
+        if not video_id or not owner_id:
+            logger.error(f"❌ Не получены video_id/owner_id после загрузки: {data}")
+            return ""
+
+        logger.info(f"Файл загружен. video_id={video_id}, owner_id={owner_id}. Ждём обработки...")
+
+        # 3. Ждём, пока видео обработается
+        max_wait_seconds = 600  # 10 минут максимум
+        check_interval = 5
+        elapsed = 0
+        while elapsed < max_wait_seconds:
+            video_info = self.group_api.video.get(
+                videos=f"{owner_id}_{video_id}",
+                extended=0,
+            )
+            items = video_info.get("items", [])
+            if not items:
+                logger.warning("Видео не найдено в ответе video.get — пробуем дальше")
+                time.sleep(check_interval)
+                elapsed += check_interval
+                continue
+
+            item = items[0]
+            processing = item.get("processing", False)
+            if processing:
+                logger.debug("Видео ещё обрабатывается...")
+                time.sleep(check_interval)
+                elapsed += check_interval
+            else:
+                # Обработка завершена
+                logger.info("✅ Видео обработано")
+                break
+        else:
+            logger.error("⚠️ Таймаут ожидания обработки видео")
+
+        return f"video{owner_id}_{video_id}"
+
+    def add_photo_paths(self, peer_id: int, user_id: int, photo_paths: list[str]):
+        draft = self._get_draft(peer_id, user_id)
+        draft.photos.extend(photo_paths)
+        return f"✅ Принято фото: {len(photo_paths)}. Теперь пришлите видео (если есть) или /skip.", None
+
+    def add_video_paths(self, peer_id: int, user_id: int, video_paths: list[str]):
+        draft = self._get_draft(peer_id, user_id)
+        draft.videos.extend(video_paths)
+        return f"✅ Принято видео: {len(video_paths)}. Теперь пришлите /skip или дату публикации.", None
