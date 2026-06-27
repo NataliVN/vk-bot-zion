@@ -1,8 +1,10 @@
 import logging
 import time
+from typing import Any, Optional
 
-from vk_api import VkApi
-from vk_api.longpoll import VkLongPoll, VkEventType
+import vk_api
+from vk_api.bot_longpoll import VkBotEventType, VkBotLongPoll
+from vk_api.utils import get_random_id
 
 from app.config import settings
 from app.dialog import DialogManager
@@ -10,81 +12,116 @@ from app.dialog import DialogManager
 logger = logging.getLogger(__name__)
 
 
-def _safe_int(value):
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
+def get_message_dict(event: Any) -> Optional[dict]:
+    obj = getattr(event, "object", None) or getattr(event, "obj", None)
+    if obj is None:
         return None
 
+    if isinstance(obj, dict):
+        return obj.get("message") or obj
 
-def _normalize_attachments(raw_attachments):
-    if not raw_attachments:
-        return []
-    normalized = []
-    for att in raw_attachments:
-        if isinstance(att, dict):
-            normalized.append(att)
-        elif isinstance(att, str):
-            normalized.append({"type": "raw", "raw": att})
-    return normalized
+    message = getattr(obj, "message", None)
+    if message is not None:
+        if isinstance(message, dict):
+            return message
+        return {
+            "peer_id": getattr(message, "peer_id", None),
+            "from_id": getattr(message, "from_id", None),
+            "text": getattr(message, "text", ""),
+            "payload": getattr(message, "payload", None),
+            "attachments": getattr(message, "attachments", None),
+        }
+
+    return None
 
 
-def main():
+def send_message(vk, peer_id: int, text: str, keyboard: Optional[str] = None) -> None:
+    params = {
+        "peer_id": peer_id,
+        "message": text,
+        "random_id": get_random_id(),
+    }
+    if keyboard:
+        params["keyboard"] = keyboard
+    vk.messages.send(**params)
+
+
+def main() -> None:
     logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        level=logging.DEBUG,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    while True:
-        try:
-            vk_session = VkApi(
-                token=settings.vk_group_token,
-                api_version=settings.vk_api_version,
+    if not settings.vk_group_token:
+        logger.error("VK_GROUP_TOKEN не задан в .env")
+        return
+
+    if not settings.vk_group_id:
+        logger.error("VK_GROUP_ID не задан в .env")
+        return
+
+    vk_session = vk_api.VkApi(token=settings.vk_group_token)
+    vk = vk_session.get_api()
+    longpoll = VkBotLongPoll(vk_session, settings.vk_group_id)
+    dialog_manager = DialogManager(vk_session)
+
+    logger.info("Бот запущен. Ожидаю сообщения...")
+
+    for event in longpoll.listen():
+        logger.debug("Получено событие: type=%s, event=%s", event.type, event)
+
+        if event.type != VkBotEventType.MESSAGE_NEW:
+            continue
+
+        msg = get_message_dict(event)
+        if not msg:
+            logger.warning(
+                "Не удалось получить message. object=%r obj=%r",
+                getattr(event, "object", None),
+                getattr(event, "obj", None),
             )
-            vk = vk_session.get_api()
-            longpoll = VkLongPoll(vk_session)
-            dialog_manager = DialogManager(vk_session)
+            continue
 
-            logger.info("Бот запущен")
+        peer_id = msg.get("peer_id")
+        from_id = msg.get("from_id")
+        text = (msg.get("text") or "").strip()
+        payload = msg.get("payload")
+        attachments = msg.get("attachments") or []
 
-            for event in longpoll.listen():
-                try:
-                    if event.type != VkEventType.MESSAGE_NEW or not event.to_me or not event.from_user:
-                        continue
+        logger.debug(
+            "message fields: peer_id=%r, from_id=%r, text=%r, payload=%r",
+            peer_id, from_id, text, payload
+        )
 
-                    peer_id = _safe_int(getattr(event, "peer_id", None))
-                    user_id = _safe_int(getattr(event, "user_id", None))
-                    text = (getattr(event, "text", "") or "").strip()
-                    attachments = _normalize_attachments(getattr(event, "attachments", None))
+        if peer_id is None or from_id is None:
+            logger.warning("Не удалось получить peer_id или from_id")
+            continue
 
-                    if peer_id is None or user_id is None:
-                        continue
+        if from_id == -settings.vk_group_id:
+            continue
 
-                    if text.lower() == "/start":
-                        message, _ = dialog_manager.start(peer_id, user_id)
-                    elif attachments:
-                        replies = dialog_manager.handle_attachments(peer_id, user_id, attachments)
-                        message = "\n".join(replies) if replies else "Вложения приняты."
-                    else:
-                        message, _ = dialog_manager.handle_text(peer_id, user_id, text)
+        response_text = None
+        keyboard = None
 
-                    vk.messages.send(
-                        peer_id=peer_id,
-                        message=message,
-                        random_id=int(time.time() * 1000000),
-                    )
+        if text.lower() in ["/start", "/старт"]:
+            response_text, keyboard = dialog_manager.start(peer_id, from_id)
+        elif attachments:
+            response_text, keyboard = dialog_manager.handle_attachments(peer_id, from_id, attachments)
+        else:
+            response_text, keyboard = dialog_manager.handle_text(peer_id, from_id, text, payload)
 
-                except Exception as inner_e:
-                    logger.exception("Ошибка обработки события: %s", inner_e)
+        if response_text is None:
+            response_text = "Напишите /start"
 
-        except KeyboardInterrupt:
-            logger.info("Остановка вручную")
-            break
+        try:
+            send_message(vk, peer_id, response_text, keyboard)
+            logger.info("Отправлено сообщение в peer_id=%s", peer_id)
+        except vk_api.exceptions.ApiError as e:
+            logger.exception("API ошибка VK: %s", e)
+            if e.code == 912:
+                logger.error("Ошибка 912: включите сообщения сообщества и режим бота в настройках группы.")
         except Exception as e:
-            logger.exception("Критическая ошибка бота: %s", e)
-            time.sleep(5)
+            logger.exception("Неожиданная ошибка отправки: %s", e)
 
 
 if __name__ == "__main__":
