@@ -1,5 +1,4 @@
 import logging
-import time
 from typing import Any, Optional
 
 import vk_api
@@ -103,7 +102,7 @@ def main() -> None:
         response_text = None
         keyboard = None
 
-        if text.lower() in ["/start", "/старт"]:
+        if text.lower() in ["/start", "/старт", "создать отложенный пост"]:
             response_text, keyboard = dialog_manager.start(peer_id, from_id)
         elif attachments:
             response_text, keyboard = dialog_manager.handle_attachments(peer_id, from_id, attachments)

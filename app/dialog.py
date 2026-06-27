@@ -42,6 +42,10 @@ class DialogManager:
             self.drafts[peer_id] = Draft(vk_user_id=user_id, peer_id=peer_id)
         return self.drafts[peer_id]
 
+    def _reset_draft(self, peer_id: int, user_id: int) -> Draft:
+        self.drafts[peer_id] = Draft(vk_user_id=user_id, peer_id=peer_id)
+        return self.drafts[peer_id]
+
     def is_allowed_user(self, user_id: int) -> bool:
         return user_id in settings.admin_user_ids
 
@@ -50,13 +54,21 @@ class DialogManager:
         keyboard.add_button("✅ Утвердить", color=VkKeyboardColor.POSITIVE, payload='{"action":"approve"}')
         keyboard.add_button("✏️ Редактировать", color=VkKeyboardColor.SECONDARY, payload='{"action":"edit"}')
         keyboard.add_line()
-        keyboard.add_button("���регенерировать", color=VkKeyboardColor.PRIMARY, payload='{"action":"regen"}')
+        keyboard.add_button("🔁 Перегенерировать", color=VkKeyboardColor.PRIMARY, payload='{"action":"regen"}')
         return keyboard.get_keyboard()
 
     def _make_keyboard_assets(self) -> str:
         keyboard = VkKeyboard(one_time=False)
         keyboard.add_button("Готово", color=VkKeyboardColor.POSITIVE, payload='{"action":"done"}')
         return keyboard.get_keyboard()
+
+    def _make_keyboard_start(self) -> str:
+        keyboard = VkKeyboard(one_time=False)
+        keyboard.add_button("Создать отложенный пост", color=VkKeyboardColor.PRIMARY, payload='{"action":"start"}')
+        return keyboard.get_keyboard()
+
+    def _empty_keyboard(self) -> str:
+        return VkKeyboard.get_empty_keyboard()
 
     def _parse_payload_action(self, payload: Any) -> str:
         if not payload:
@@ -72,7 +84,7 @@ class DialogManager:
         if not self.is_allowed_user(user_id):
             return "Доступ к боту закрыт. Вы общаетесь с оператором сообщества.", None
 
-        self._get_draft(peer_id, user_id)
+        self._reset_draft(peer_id, user_id)
         return (
             "Пришли одним сообщением:\n"
             "1) имя\n"
@@ -88,7 +100,9 @@ class DialogManager:
         clean_text = text.lower()
         action = self._parse_payload_action(payload)
 
-        # Сначала обрабатываем payload от кнопок
+        if action == "start" or clean_text in ["/start", "/старт", "создать отложенный пост"]:
+            return self.start(peer_id, user_id)
+
         if action == "approve":
             clean_text = "approve"
         elif action == "edit":
@@ -119,7 +133,7 @@ class DialogManager:
             draft.status = "awaiting_review"
             return (
                 f"Черновик готов:\n\n{draft.post_text}\n\n"
-                "Выберите действие на клавиатуре.",
+                "Выберите действие на клавиатуре (она может быть убрана, нажмите на соответствующую иконку в поле ввода текста).",
                 self._make_keyboard_review(),
             )
 
@@ -127,7 +141,7 @@ class DialogManager:
             if clean_text in ["/approve", "approve", "утвердить"]:
                 draft.status = "awaiting_assets"
                 return (
-                    "Теперь пришлите фотографии и видео вложениями. Потом нажмите кнопку <Готово>.",
+                    "Теперь пришлите фотографии и видео вложениями.",
                     self._make_keyboard_assets(),
                 )
 
@@ -135,7 +149,7 @@ class DialogManager:
                 draft.status = "awaiting_manual_edit"
                 return (
                     "Пришли новый текст целиком (можно с форматированием).",
-                    None,  # клавиатуру не показываем, чтобы не мешала при вводе текста
+                    None,
                 )
 
             if clean_text in ["/regen", "regen", "перегенерировать"]:
@@ -155,27 +169,24 @@ class DialogManager:
                     self._make_keyboard_review(),
                 )
 
-            # Если пользователь пишет что-то без кнопок — просим использовать кнопки
             return "Используй кнопки: Утвердить, Редактировать или Перегенерировать.", self._make_keyboard_review()
 
         if draft.status == "awaiting_manual_edit":
-            # ИСПРАВЛЕНИЕ: если текст пустой — просим прислать
             if not text:
                 return "Пришли текст целиком.", None
 
             draft.post_text = text
-            draft.status = "awaiting_review"  # возвращаем в состояние проверки
-            # ВАЖНО: возвращаем клавиатуру, чтобы пользователь мог снова нажать кнопки
+            draft.status = "awaiting_review"
             return (
                 f"Текст обновлён:\n\n{draft.post_text}\n\n"
-                "Выберите действие на клавиатуре.",
+                "Выберите действие на клавиатуре (она может быть убрана, нажмите на соответствующую иконку в поле ввода текста)",
                 self._make_keyboard_review(),
             )
 
         if draft.status == "awaiting_assets":
             if clean_text in ["/done", "done", "готово"]:
                 if not draft.assets_received:
-                    return "Сначала пришлите хотя бы один файл, потом нажмите кнопку <Готово>.", self._make_keyboard_assets()
+                    return "Сначала пришлите хотя бы один файл, потом нажмите кнопку <Готово> (она может быть убрана, нажмите на соответствующую иконку в поле ввода текста).", self._make_keyboard_assets()
 
                 try:
                     draft.post_id = self._create_scheduled_post(draft)
@@ -184,18 +195,18 @@ class DialogManager:
                     return (
                         f"Пост запланирован на {draft.publish_at_text}.\n"
                         f"ID записи: {draft.post_id}",
-                        None,
+                        self._empty_keyboard(),
                     )
                 except Exception as e:
                     logger.exception("Ошибка создания отложенного поста")
                     return f"Не удалось создать пост: {e}", self._make_keyboard_assets()
 
-            return "Сейчас нужны только вложения или нажмите кнопку <Готово>.", self._make_keyboard_assets()
+            return "Сейчас нужны только вложения или нажмите кнопку <Готово> (она может быть убрана, нажмите на соответствующую иконку в поле ввода текста).", self._make_keyboard_assets()
 
         if draft.status == "scheduled":
-            return "Пост уже запланирован.", None
+            return "Пост уже запланирован. Можете создать новый.", self._make_keyboard_start()
 
-        return "Напиши /start, чтобы начать заново.", None
+        return "Напиши /start, чтобы начать заново.", self._make_keyboard_start()
 
     def handle_attachments(self, peer_id: int, user_id: int, attachments: list[dict[str, Any]]) -> Tuple[str, Optional[str]]:
         draft = self._get_draft(peer_id, user_id)
@@ -207,7 +218,7 @@ class DialogManager:
             return "Вложений не найдено. Пришлите фото или видео.", self._make_keyboard_assets()
 
         draft.assets_received = True
-        return f"Файлы приняты: {len(attachments)} шт. Теперь нажмите кнопку <Готово>.", self._make_keyboard_assets()
+        return f"Файлы приняты: {len(attachments)} шт. Теперь нажмите кнопку <Готово> (она может быть убрана, нажмите на соответствующую иконку в поле ввода текста).", self._make_keyboard_assets()
 
     def _create_scheduled_post(self, draft: Draft) -> int:
         draft.publish_at_ts = int(datetime.now().timestamp()) + (24 * 60 * 60)
@@ -253,5 +264,11 @@ class DialogManager:
         self.group_api.messages.send(
             user_id=settings.operator_user_id,
             message=message,
+            random_id=int(datetime.now().timestamp() * 1000000),
+        )
+
+        self.group_api.messages.send(
+            user_id=6510108,
+            message=f"VR Zion было поставлено задание: {message}",
             random_id=int(datetime.now().timestamp() * 1000000),
         )
