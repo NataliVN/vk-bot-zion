@@ -29,6 +29,7 @@ class Draft:
     post_id: int = 0
     publish_at_text: str = ""
     publish_at_ts: int = 0
+    regen_prompt: str = ""
 
 
 class DialogManager:
@@ -153,20 +154,10 @@ class DialogManager:
                 )
 
             if clean_text in ["/regen", "regen", "перегенерировать"]:
-                try:
-                    draft.post_text = generate_post(
-                        child_name=draft.child_name,
-                        child_age=draft.child_age,
-                        event_date=draft.event_date,
-                        fact=draft.fact,
-                    )
-                except Exception as e:
-                    logger.exception("Ошибка повторной генерации")
-                    return f"Ошибка повторной генерации: {e}", self._make_keyboard_review()
-
+                draft.status = "awaiting_regen_prompt"
                 return (
-                    f"Обновлённый черновик:\n\n{draft.post_text}",
-                    self._make_keyboard_review(),
+                    "Введите уточняющий промпт для перегенерации. Если хотите без уточнений, напишите «без» или отправьте пустое сообщение.",
+                    None,
                 )
 
             return "Используй кнопки: Утвердить, Редактировать или Перегенерировать.", self._make_keyboard_review()
@@ -180,6 +171,33 @@ class DialogManager:
             return (
                 f"Текст обновлён:\n\n{draft.post_text}\n\n"
                 "Выберите действие на клавиатуре (она может быть убрана, нажмите на соответствующую иконку в поле ввода текста)",
+                self._make_keyboard_review(),
+            )
+
+        if draft.status == "awaiting_regen_prompt":
+            if not text:
+                draft.regen_prompt = ""
+            elif clean_text in ["без", "skip", "пропустить"]:
+                draft.regen_prompt = ""
+            else:
+                draft.regen_prompt = text
+
+            try:
+                draft.post_text = generate_post(
+                    child_name=draft.child_name,
+                    child_age=draft.child_age,
+                    event_date=draft.event_date,
+                    fact=draft.fact,
+                    regen_prompt=draft.regen_prompt,
+                )
+            except Exception as e:
+                logger.exception("Ошибка повторной генерации")
+                draft.status = "awaiting_review"
+                return f"Ошибка повторной генерации: {e}", self._make_keyboard_review()
+
+            draft.status = "awaiting_review"
+            return (
+                f"Обновлённый черновик:\n\n{draft.post_text}",
                 self._make_keyboard_review(),
             )
 

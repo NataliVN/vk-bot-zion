@@ -50,13 +50,17 @@ class LLMService:
         child_age: str | int,
         event_date: str,
         fact: str,
+        regen_prompt: str = "",
     ) -> str:
-        return self.template.format(
+        base = self.template.format(
             child_name=child_name,
             child_age=child_age,
             event_date=event_date,
             fact=fact,
         )
+        if regen_prompt:
+            base += f"\n\nУточнение от оператора: {regen_prompt}"
+        return base
 
     def chat(
         self,
@@ -85,12 +89,14 @@ def generate_post(
     child_age: str | int,
     event_date: str,
     fact: str,
+    regen_prompt: str = "",
 ) -> str:
     prompt = _llm_service.build_prompt(
         child_name=child_name,
         child_age=child_age,
         event_date=event_date,
         fact=fact,
+        regen_prompt=regen_prompt,
     )
     return _llm_service.chat(prompt)
 
