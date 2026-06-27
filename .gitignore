@@ -2,6 +2,7 @@
 __pycache__/
 vk_test*.py
 vk_token*.py
+token_script.py
 *.py[codz]
 *$py.class
 old version/
