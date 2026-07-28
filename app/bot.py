@@ -110,7 +110,7 @@ def main() -> None:
             response_text, keyboard = dialog_manager.handle_text(peer_id, from_id, text, payload)
 
         if response_text is None:
-            response_text = "Напишите /start"
+            continue
 
         try:
             send_message(vk, peer_id, response_text, keyboard)

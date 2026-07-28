@@ -95,7 +95,10 @@ class DialogManager:
             None,
         )
 
-    def handle_text(self, peer_id: int, user_id: int, text: str, payload: Any = None) -> Tuple[str, Optional[str]]:
+    def handle_text(self, peer_id: int, user_id: int, text: str, payload: Any = None) -> Tuple[Optional[str], Optional[str]]:
+        if not self.is_allowed_user(user_id):
+            return None, None
+    
         draft = self._get_draft(peer_id, user_id)
         text = (text or "").strip()
         clean_text = text.lower()
@@ -226,7 +229,10 @@ class DialogManager:
 
         return "Напиши /start, чтобы начать заново.", self._make_keyboard_start()
 
-    def handle_attachments(self, peer_id: int, user_id: int, attachments: list[dict[str, Any]]) -> Tuple[str, Optional[str]]:
+    def handle_attachments(self, peer_id: int, user_id: int, attachments: list[dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+        if not self.is_allowed_user(user_id):
+                return None, None
+        
         draft = self._get_draft(peer_id, user_id)
 
         if draft.status != "awaiting_assets":

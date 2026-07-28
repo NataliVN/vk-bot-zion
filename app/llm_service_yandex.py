@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional, cast, List, Dict, Any
+from typing import Optional, List, Dict, Any
 
 import requests
 import dotenv
 
-from app.config import settings  # Для доступа кYA_API_KEY, YA_FOLDER_ID
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +30,12 @@ class YandexLLMService:
     ):
         env = _load_env()
 
-        # 🔹 Загружаем Yandex API ключ и folder_id
+        # 🔹 ВАЖНО: Убедитесь, что в вашем .env файле переменные называются именно так:
         self.ya_api_key = env.get("YA_API_KEY")
         self.ya_folder_id = env.get("YA_FOLDER_ID")
 
         if not self.ya_api_key or not self.ya_folder_id:
-            raise ValueError("Ошибка: YA_API_KEY и YA_FOLDER_ID обязательны в .env для YandexLLMService")
+            raise ValueError("Ошибка: YA_API_KEY и YA_FOLDER_ID обязательны в .env")
 
         # 🔹 Загружаем промпт
         prompt_path = Path(prompt_file)
@@ -70,42 +70,55 @@ class YandexLLMService:
         prompt: str,
         history: Optional[List[Dict[str, str]]] = None,
     ) -> str:
-        # 🔹 Формируем тело запроса для Yandex GPT API
         messages: List[Dict[str, str]] = [
             {"role": "user", "text": prompt},
         ]
 
-        # 🔹 Добавляем историю (если есть), но YandexGPT требует "связанную" историю в одном запросе
-        # Пока игнорируем, если история пуста — просто передаём одиночное сообщение
         if history:
-            # У Yandex API нет прямой поддержки `history`, но мы можем "встроить" предыдущие сообщения в prompt
             for msg in history:
                 role = msg.get("role", "user")
                 text = msg.get("text", "")
                 messages.append({"role": role, "text": text})
 
-        # 🔹 Отправляем запрос в Yandex GPT API
+        # 🔹 ИСПРАВЛЕННЫЙ PAYLOAD
+        payload = {
+            # ИСПРАВЛЕНО: правильный формат URI для YandexGPT
+            "modelUri": f"gpt://{self.ya_folder_id}/yandexgpt-lite/latest",
+            "completionOptions": {
+                "stream": False,
+                "temperature": self.temperature,
+                # ИСПРАВЛЕНО: передаем как строку для надежности
+                "maxTokens": str(self.max_tokens),
+            },
+            "messages": messages,
+        }
+
+        # 🔹 ДИАГНОСТИКА (чтобы видеть, что именно уходит)
+        print("\n" + "="*50)
+        print("🔍 ОТПРАВКА ЗАПРОСА К YANDEX GPT:")
+        print(f"Folder ID: {self.ya_folder_id}")
+        print(f"Payload: {payload}")
+        print("="*50 + "\n")
+
+        # 🔹 ИСПРАВЛЕННЫЕ HEADERS
         response = requests.post(
             url="https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
             headers={
                 "Authorization": f"Api-Key {self.ya_api_key}",
+                "Content-Type": "application/json",  # ДОБАВЛЕНО
                 "x-folder-id": self.ya_folder_id,
             },
-            json={
-                "modelUri": f"yandex://{self.ya_folder_id}/model/{self.model_name}",
-                "completionOptions": {
-                    "stream": False,
-                    "temperature": self.temperature,
-                    "maxTokens": self.max_tokens,
-                },
-                "messages": messages,
-            },
+            json=payload,
         )
 
+        # Если ошибка, выводим подробный текст от Яндекса
+        if response.status_code != 200:
+            print(f"❌ ОШИБКА YANDEX: {response.status_code}")
+            print(f"Ответ сервера: {response.text}")
+        
         response.raise_for_status()
         result = response.json()
 
-        # 🔹 Распарсиваем результат (Yandex GPT возвращает `result` в `alternatives[0].message.text`)
         alternatives = result.get("result", {}).get("alternatives", [])
         if not alternatives:
             raise ValueError("Yandex GPT вернул пустой ответ")
@@ -141,7 +154,6 @@ def chat_with_llm(
 ) -> str:
     history = history or []
     result = _yandex_llm_service.chat(prompt, history)
-    # Добавляем сообщения в историю (в формате "user"/"assistant")
     history.append({"role": "user", "text": prompt})
     history.append({"role": "assistant", "text": result})
     return result
