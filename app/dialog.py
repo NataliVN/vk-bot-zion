@@ -14,7 +14,7 @@ import vk_api
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 
 from app.config import settings
-from app.llm_service_yandex import generate_post
+from app.llm_service_yandex import generate_post, generate_free_post
 from app.token_manager import token_manager
 
 logger = logging.getLogger(__name__)
@@ -24,12 +24,14 @@ logger = logging.getLogger(__name__)
 class Draft:
     vk_user_id: int
     peer_id: int
+    draft_type: str = ""  # "birthday" или "free"
     child_name: str = ""
     child_age: str = ""
     event_date: str = ""
     fact: str = ""
+    user_prompt: str = ""  # Промпт для свободного поста
     post_text: str = ""
-    status: str = "awaiting_data"
+    status: str = "awaiting_menu"
     assets_received: bool = False
     attachment_string: str = ""
     post_id: int = 0
@@ -56,6 +58,14 @@ class DialogManager:
 
     def is_allowed_user(self, user_id: int) -> bool:
         return user_id in settings.admin_user_ids
+
+    # 🔹 НОВОЕ МЕНЮ ВЫБОРА ТИПА ПОСТА
+    def _make_keyboard_menu(self) -> str:
+        keyboard = VkKeyboard(one_time=False)
+        keyboard.add_button("🎂 Пост про день рождения", color=VkKeyboardColor.PRIMARY, payload='{"action":"birthday"}')
+        keyboard.add_line()
+        keyboard.add_button("✍️ Свободный пост", color=VkKeyboardColor.SECONDARY, payload='{"action":"free"}')
+        return keyboard.get_keyboard()
 
     def _make_keyboard_review(self) -> str:
         keyboard = VkKeyboard(one_time=False)
@@ -86,6 +96,12 @@ class DialogManager:
         keyboard.add_button("Создать отложенный пост", color=VkKeyboardColor.PRIMARY, payload='{"action":"start"}')
         return keyboard.get_keyboard()
 
+    def _make_keyboard_cancel(self) -> str:
+        """Клавиатура для этапов ввода данных (только кнопка Отмена)"""
+        keyboard = VkKeyboard(one_time=False)
+        keyboard.add_button("❌ Отмена", color=VkKeyboardColor.NEGATIVE, payload='{"action":"cancel"}')
+        return keyboard.get_keyboard()
+
     def _empty_keyboard(self) -> str:
         return VkKeyboard.get_empty_keyboard()
 
@@ -102,7 +118,10 @@ class DialogManager:
         if not self.is_allowed_user(user_id):
             return None, None
         self._reset_draft(peer_id, user_id)
-        return "Пришли одним сообщением 4 строки:\n1) имя\n2) возраст\n3) дата мероприятия\n4) интересный факт\n\nИли нажмите ❌ Отмена", None
+        return (
+            "👋 Привет! Выберите тип поста, который хотите создать:",
+            self._make_keyboard_menu()
+        )
 
     def handle_text(self, peer_id: int, user_id: int, text: str, payload: Any = None) -> Tuple[Optional[str], Optional[str]]:
         if not self.is_allowed_user(user_id):
@@ -113,8 +132,31 @@ class DialogManager:
         clean_text = text.lower()
         action = self._parse_payload_action(payload)
 
-        if action == "start" or clean_text in ["/start", "/старт", "создать отложенный пост"]:
+        # 🔹 СТАРТ ИЛИ ВЫБОР ТИПА ПОСТА
+        if action == "start" or clean_text in ["старт","/start", "/старт", "создать отложенный пост"]:
             return self.start(peer_id, user_id)
+
+        if action == "birthday":
+            draft.draft_type = "birthday"
+            draft.status = "awaiting_data"
+            return (
+                "Отлично! Пришли одним сообщением 4 строки:\n"
+                "1) имя\n2) возраст\n3) дата мероприятия\n4) интересный факт\n\n"
+                "Или нажмите ❌ Отмена"
+            ), self._make_keyboard_cancel()
+
+        if action == "free":
+            draft.draft_type = "free"
+            draft.status = "awaiting_free_prompt"
+            return (
+                "✍️ Опишите, о чём должен быть пост, в свободной форме.\n\n"
+                "Например:\n"
+                "• «Расскажи о нашем новом аттракционе VR-качели»\n"
+                "• «Напиши анонс акции на выходные — скидка 20%»\n"
+                "• «Поблагодари гостей за вчерашний день рождения Пети»\n\n"
+                "Или нажмите ❌ Отмена"
+            ), self._make_keyboard_cancel()
+
         if action == "cancel":
             self._reset_draft(peer_id, user_id)
             return "🛑 Создание поста отменено. Вы можете начать заново, нажав /start", self._make_keyboard_start()
@@ -124,6 +166,7 @@ class DialogManager:
         elif action == "regen": clean_text = "regen"
         elif action == "done": clean_text = "done"
 
+        # 🔹 СОСТОЯНИЕ: ОЖИДАНИЕ ДАННЫХ ДЛЯ ДР
         if draft.status == "awaiting_data":
             lines = [x.strip() for x in text.splitlines() if x.strip()]
             if len(lines) < 4:
@@ -140,10 +183,28 @@ class DialogManager:
             draft.status = "awaiting_review"
             return f"Черновик готов:\n\n{draft.post_text}\n\nВыберите действие:", self._make_keyboard_review()
 
+        # 🔹 СОСТОЯНИЕ: ОЖИДАНИЕ ПРОМПТА ДЛЯ СВОБОДНОГО ПОСТА
+        if draft.status == "awaiting_free_prompt":
+            if len(text) < 5:
+                return "Пожалуйста, опишите подробнее, о чём должен быть пост (минимум 5 символов).", None
+            draft.user_prompt = text
+            try:
+                draft.post_text = generate_free_post(user_prompt=text)
+            except Exception as e:
+                logger.exception("Ошибка генерации свободного поста")
+                return f"Ошибка генерации поста: {e}", None
+            draft.status = "awaiting_review"
+            return f"Черновик готов:\n\n{draft.post_text}\n\nВыберите действие:", self._make_keyboard_review()
+
+        # 🔹 СОСТОЯНИЕ: РЕВЬЮ ЧЕРНОВИКА (ОБЩЕЕ ДЛЯ ОБИИХ ТИПОВ)
         if draft.status == "awaiting_review":
             if clean_text in ["/approve", "approve", "утвердить"]:
                 draft.status = "awaiting_time"
-                return "Отлично! Теперь укажите дату и время публикации.\n\nВы можете нажать кнопку «📅 Завтра в это же время» ниже,\nили ввести вручную в формате: ДД.ММ ЧЧ:ММ (например: 25.08 18:30)", self._make_keyboard_time()
+                return (
+                    "Отлично! Теперь укажите дату и время публикации.\n\n"
+                    "Вы можете нажать кнопку «📅 Завтра в это же время» ниже,\n"
+                    "или ввести вручную в формате: ДД.ММ ЧЧ:ММ (например: 25.08 18:30)"
+                ), self._make_keyboard_time()
             if clean_text in ["/edit", "edit", "редактировать"]:
                 draft.status = "awaiting_manual_edit"
                 return "Пришли новый текст целиком.", None
@@ -152,6 +213,7 @@ class DialogManager:
                 return "Введите уточняющий промпт. Если без уточнений, напишите «без».", None
             return "Используй кнопки: Утвердить, Редактировать, Перегенерировать или Отмена.", self._make_keyboard_review()
 
+        # 🔹 СОСТОЯНИЕ: ВЫБОР ВРЕМЕНИ
         if draft.status == "awaiting_time":
             if action == "tomorrow":
                 tomorrow = datetime.now() + timedelta(days=1)
@@ -170,6 +232,7 @@ class DialogManager:
             except ValueError:
                 return "⚠️ Неверный формат. Введите как ДД.ММ ЧЧ:ММ (например: 25.08 18:30)\nИли нажмите кнопку «📅 Завтра в это же время».", self._make_keyboard_time()
 
+        # 🔹 СОСТОЯНИЕ: РЕДАКТИРОВАНИЕ ТЕКСТА
         if draft.status == "awaiting_manual_edit":
             if not text:
                 return "Пришли текст целиком.", None
@@ -177,19 +240,26 @@ class DialogManager:
             draft.status = "awaiting_review"
             return f"Текст обновлён:\n\n{draft.post_text}", self._make_keyboard_review()
 
+        # 🔹 СОСТОЯНИЕ: ПЕРЕГЕНЕРАЦИЯ
         if draft.status == "awaiting_regen_prompt":
             draft.regen_prompt = "" if not text or clean_text in ["без", "skip", "пропустить"] else text
             try:
-                draft.post_text = generate_post(
-                    child_name=draft.child_name, child_age=draft.child_age,
-                    event_date=draft.event_date, fact=draft.fact, regen_prompt=draft.regen_prompt
-                )
+                if draft.draft_type == "birthday":
+                    draft.post_text = generate_post(
+                        child_name=draft.child_name, child_age=draft.child_age,
+                        event_date=draft.event_date, fact=draft.fact, regen_prompt=draft.regen_prompt
+                    )
+                else:  # free
+                    draft.post_text = generate_free_post(
+                        user_prompt=draft.user_prompt, regen_prompt=draft.regen_prompt
+                    )
             except Exception as e:
                 draft.status = "awaiting_review"
                 return f"Ошибка повторной генерации: {e}", self._make_keyboard_review()
             draft.status = "awaiting_review"
             return f"Обновлённый черновик:\n\n{draft.post_text}", self._make_keyboard_review()
 
+        # 🔹 СОСТОЯНИЕ: ОЖИДАНИЕ ВЛОЖЕНИЙ
         if draft.status == "awaiting_assets":
             if clean_text in ["/done", "done", "готово", "готово к публикации"]:
                 if not draft.assets_received:
@@ -212,7 +282,7 @@ class DialogManager:
 
         if draft.status == "scheduled":
             return "Пост уже запланирован. Можете создать новый.", self._make_keyboard_start()
-        
+
         return "Напиши /start, чтобы начать заново.", self._make_keyboard_start()
 
     # 🔹 МЕТОДЫ ОЧЕРЕДИ
@@ -234,7 +304,7 @@ class DialogManager:
         if not self.is_allowed_user(user_id):
             return None, None
         draft = self._get_draft(peer_id, user_id)
-        
+
         if draft.status == "awaiting_time":
             return "⏳ Сначала выберите время публикации, а затем присылайте фото.", self._make_keyboard_time()
         if draft.status != "awaiting_assets":
@@ -258,8 +328,7 @@ class DialogManager:
 
         for i, att in enumerate(attachments):
             att_type = att.get("type")
-            #att_name = f"Фото {i+1}" if att_type == "photo" else (f"Видео {i+1}" if att_type == "video" else (f"Файл {att.get('doc', {}).get('ext', 'файл').upper()} {i+1}" if att_type == "doc" else f"Вложение {i+1}")
-            
+            # Читаемое имя для отчета
             if att_type == "photo":
                 att_name = f"Фото {i+1}"
             elif att_type == "video":
@@ -269,11 +338,11 @@ class DialogManager:
                 att_name = f"Файл {doc_ext} {i+1}"
             else:
                 att_name = f"Вложение {i+1}"
-            
+
             logger.info(f"🔄 Начинаю обработку: {att_name} (type: {att_type})")
-            
+
             if i > 0:
-                time.sleep(1.0) # Микро-пауза между файлами
+                time.sleep(1.0)
 
             try:
                 if att_type == "photo":
@@ -294,7 +363,7 @@ class DialogManager:
                     response.raise_for_status()
                     with open(filename, "wb") as f:
                         f.write(response.content)
-                    
+
                     if file_ext in ['heic', 'heif', 'png', 'webp']:
                         img = Image.open(filename)
                         if img.mode in ('RGBA', 'P', 'LA'):
@@ -304,36 +373,36 @@ class DialogManager:
                             os.remove(filename)
                         filename = final_filename
 
-                    resp_get = requests.get('https://api.vk.com/method/photos.getWallUploadServer', params={'group_id': group_id, 'access_token': user_token, 'v': '5.199'}, timeout=15)
+                    resp_get = requests.get('https://api.vk.com/method/photos.getWallUploadServer',
+                                            params={'group_id': group_id, 'access_token': user_token, 'v': '5.199'}, timeout=15)
                     if resp_get.status_code != 200:
                         raise Exception(f"HTTP {resp_get.status_code}")
                     upload_url_resp = resp_get.json()
                     if 'error' in upload_url_resp:
                         raise Exception(upload_url_resp['error']['error_msg'])
-                    
+
                     upload_resp_data = None
                     for attempt in range(3):
                         with open(filename, 'rb') as f:
                             resp_post = requests.post(upload_url_resp['response']['upload_url'], files={'photo': f}, timeout=15)
                         if resp_post.status_code != 200:
-                            if attempt < 2:
-                                time.sleep(1)
+                            if attempt < 2: time.sleep(1)
                             continue
                         try:
                             upload_resp_data = resp_post.json()
                         except requests.exceptions.JSONDecodeError:
-                            if attempt < 2:
-                                time.sleep(1)
+                            if attempt < 2: time.sleep(1)
                             continue
                         if 'photo' in upload_resp_data and upload_resp_data.get('photo'):
                             break
-                        if attempt < 2:
-                            time.sleep(1)
-                    
+                        if attempt < 2: time.sleep(1)
+
                     if not upload_resp_data or 'photo' not in upload_resp_data or not upload_resp_data.get('photo'):
                         raise Exception("VK вернул пустой параметр photo")
 
-                    resp_save = requests.post('https://api.vk.com/method/photos.saveWallPhoto', data={'group_id': group_id, 'server': upload_resp_data['server'], 'photo': upload_resp_data['photo'], 'hash': upload_resp_data['hash'], 'access_token': user_token, 'v': '5.199'}, timeout=15)
+                    resp_save = requests.post('https://api.vk.com/method/photos.saveWallPhoto',
+                        data={'group_id': group_id, 'server': upload_resp_data['server'], 'photo': upload_resp_data['photo'],
+                              'hash': upload_resp_data['hash'], 'access_token': user_token, 'v': '5.199'}, timeout=15)
                     if resp_save.status_code != 200:
                         raise Exception(f"HTTP {resp_save.status_code}")
                     try:
@@ -371,36 +440,36 @@ class DialogManager:
                                 os.remove(filename)
                             filename = final_filename
 
-                        resp_get = requests.get('https://api.vk.com/method/photos.getWallUploadServer', params={'group_id': group_id, 'access_token': user_token, 'v': '5.199'}, timeout=15)
+                        resp_get = requests.get('https://api.vk.com/method/photos.getWallUploadServer',
+                                                params={'group_id': group_id, 'access_token': user_token, 'v': '5.199'}, timeout=15)
                         if resp_get.status_code != 200:
                             raise Exception(f"HTTP {resp_get.status_code}")
                         upload_url_resp = resp_get.json()
                         if 'error' in upload_url_resp:
                             raise Exception(upload_url_resp['error']['error_msg'])
-                        
+
                         upload_resp_data = None
                         for attempt in range(3):
                             with open(filename, 'rb') as f:
                                 resp_post = requests.post(upload_url_resp['response']['upload_url'], files={'photo': f}, timeout=15)
                             if resp_post.status_code != 200:
-                                if attempt < 2:
-                                    time.sleep(1)
+                                if attempt < 2: time.sleep(1)
                                 continue
                             try:
                                 upload_resp_data = resp_post.json()
                             except requests.exceptions.JSONDecodeError:
-                                if attempt < 2:
-                                    time.sleep(1)
+                                if attempt < 2: time.sleep(1)
                                 continue
                             if 'photo' in upload_resp_data and upload_resp_data.get('photo'):
                                 break
-                            if attempt < 2:
-                                time.sleep(1)
-                        
+                            if attempt < 2: time.sleep(1)
+
                         if not upload_resp_data or 'photo' not in upload_resp_data or not upload_resp_data.get('photo'):
                             raise Exception("VK вернул пустой параметр photo")
 
-                        resp_save = requests.post('https://api.vk.com/method/photos.saveWallPhoto', data={'group_id': group_id, 'server': upload_resp_data['server'], 'photo': upload_resp_data['photo'], 'hash': upload_resp_data['hash'], 'access_token': user_token, 'v': '5.199'}, timeout=15)
+                        resp_save = requests.post('https://api.vk.com/method/photos.saveWallPhoto',
+                            data={'group_id': group_id, 'server': upload_resp_data['server'], 'photo': upload_resp_data['photo'],
+                                  'hash': upload_resp_data['hash'], 'access_token': user_token, 'v': '5.199'}, timeout=15)
                         if resp_save.status_code != 200:
                             raise Exception(f"HTTP {resp_save.status_code}")
                         try:
@@ -434,7 +503,7 @@ class DialogManager:
             finally:
                 if 'filename' in locals():
                     for f in [filename, final_filename if 'final_filename' in locals() else None]:
-                        if f and os.path.exists(f): 
+                        if f and os.path.exists(f):
                             try:
                                 os.remove(f)
                             except:
@@ -449,10 +518,10 @@ class DialogManager:
                 current.append(new_att)
         draft.attachment_string = ",".join(current)
         draft.assets_received = True
-        
+
         total = len(current)
         logger.info(f"📎 ИТОГО в очереди: {total}. Строка: {draft.attachment_string}")
-        
+
         report_lines = [f"✅ Обработано файлов: {len(success_names)} из {len(attachments)}."]
         if success_names:
             report_lines.append(f"Успешно: {', '.join(success_names)}")
@@ -461,13 +530,13 @@ class DialogManager:
             report_lines.append("💡 Пожалуйста, отправьте эти файлы **отдельным сообщением**, чтобы я мог их добавить.")
         report_lines.append(f"\nВсего в очереди для поста: {total} шт.")
         report_lines.append("Можете добавить ещё или нажать <Готово к публикации>.")
-        
+
         return "\n".join(report_lines), self._make_keyboard_assets()
 
     def _create_scheduled_post(self, draft: Draft) -> int:
         user_token = token_manager.get_valid_token()
         post_params = {
-            "owner_id": -abs(int(settings.vk_group_id)), 
+            "owner_id": -abs(int(settings.vk_group_id)),
             "from_group": 1,
             "message": draft.post_text,
             "publish_date": draft.publish_at_ts,
@@ -477,7 +546,7 @@ class DialogManager:
         }
         if draft.attachment_string:
             post_params["attachments"] = draft.attachment_string
-            
+
         response = requests.post("https://api.vk.com/method/wall.post", data=post_params).json()
         if "error" in response:
             raise Exception(f"Ошибка wall.post: {response['error'].get('error_msg', response['error'])}")
@@ -488,14 +557,28 @@ class DialogManager:
         chat_link = f"https://vk.com/gim{settings.vk_group_id}/convo/{draft.peer_id}"
         user_link = f"https://vk.com/id{draft.vk_user_id}"
         user_display = f"[id{draft.vk_user_id}|ID: {draft.vk_user_id}]"
-        
-        # ТЕГИ <b> УДАЛЕНЫ
+
+        # 🔹 ТИП ПОСТА
+        if draft.draft_type == "birthday":
+            post_type = "🎂 Пост про день рождения"
+            details = (
+                f"👶 Имя ребёнка: {draft.child_name}\n"
+                f"🎂 Возраст: {draft.child_age}\n"
+                f"📅 Дата мероприятия: {draft.event_date}\n"
+                f"💡 Факт: {draft.fact}\n"
+            )
+        else:
+            post_type = "✍️ Свободный пост"
+            # Показываем первые 100 символов промпта
+            prompt_short = draft.user_prompt[:100] + ("..." if len(draft.user_prompt) > 100 else "")
+            details = f"📝 Промпт: {prompt_short}\n"
+
         message = (
             f"📢 Создан новый отложенный пост!\n\n"
+            f"🏷 Тип: {post_type}\n"
             f"👤 Автор: {user_display} ({user_link})\n"
             f"💬 Диалог: {chat_link}\n"
-            f"👶 Имя ребёнка: {draft.child_name}\n"
-            f"📅 Дата мероприятия: {draft.event_date}\n"
+            f"{details}"
             f"⏰ Публикация: {draft.publish_at_text}\n"
             f"🔗 Ссылка на пост: {post_link}\n\n"
             f"✅ Все вложения успешно прикреплены."

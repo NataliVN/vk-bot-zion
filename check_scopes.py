@@ -1,34 +1,54 @@
 # check_scopes.py
-import vk_api
 import os
+import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+# Загружаем переменные из .env
+load_dotenv(override=True)
 
-# Берем именно тот токен, который использует бот
-token = os.getenv("VK_ACCESS_TOKEN")
-group_id = os.getenv("VK_GROUP_ID")
+user_token = os.getenv("VK_USER_TOKEN")
+if not user_token:
+    print("❌ Ошибка: VK_USER_TOKEN не найден в файле .env")
+    exit(1)
 
-print(f"Проверяем токен для группы {group_id}...")
+print("🔍 Проверяем права токена через VK API...\n")
 
-vk_session = vk_api.VkApi(token=token)
-api = vk_session.get_api()
+# Метод VK API для получения прав приложения
+url = "https://api.vk.com/method/account.getAppPermissions"
+params = {
+    "access_token": user_token,
+    "v": "5.199"
+}
 
-# 1. Проверяем базовое право (должно работать)
-try:
-    user = api.users.get()[0]
-    print(f"✅ users.get работает. Пользователь: {user['first_name']}")
-except Exception as e:
-    print(f"❌ users.get не работает: {e}")
+response = requests.get(url, params=params).json()
 
-# 2. Проверяем право groups (именно оно нужно для Long Poll)
-try:
-    group = api.groups.getById(group_id=group_id)[0]
-    print(f"✅ groups.getById работает! Группа: {group['name']}")
-    print("🎉 Право 'groups' ЕСТЬ в токене. Проблема в настройках Long Poll.")
-except vk_api.exceptions.ApiError as e:
-    if e.code == 15:
-        print("❌ ОШИБКА 15: Право 'groups' ОТСУТСТВУЕТ в токене!")
-        print("👉 Это значит, что VK не одобрил это право для вашего приложения, или оно слетело при генерации.")
+if "error" in response:
+    print(f"❌ Ошибка VK API: {response['error']['error_msg']}")
+    print("💡 Возможно, токен недействителен или отозван.")
+else:
+    mask = response["response"]
+    print(f"🔢 Числовая маска прав: {mask}\n")
+    print("📋 Расшифровка прав:")
+    
+    # Проверяем конкретные биты маски
+    if mask & 4:
+        print("  ✅ Фотографии (photos)")
     else:
-        print(f"❌ Другая ошибка API: {e}")
+        print("  ❌ Фотографии (photos)")
+        
+    if mask & 16:
+        print("  ✅ Видеозаписи (video)")
+    else:
+        print("  ❌ Видеозаписи (video)  <-- ВОТ ПРИЧИНА!")
+        
+    if mask & 131072:
+        print("  ✅ Стена (wall)")
+    else:
+        print("  ❌ Стена (wall)")
+        
+    if mask & 8388608:
+        print("  ✅ Сообщения (messages)")
+    else:
+        print("  ❌ Сообщения (messages)")
+
+    print("\n💡 Если напротив 'Видеозаписи' стоит ❌, значит токен был получен без галочки 'Доступ к видеозаписям'.")

@@ -65,6 +65,30 @@ class YandexLLMService:
             base += f"\n\nУточнение от оператора: {regen_prompt}"
         return base
 
+    def build_free_prompt(self, user_prompt: str, regen_prompt: str = "") -> str:
+        """Собирает промпт для свободного поста"""
+        base = (
+            "Ты пишешь короткий, living и аккуратный текст для поста сообщества VK "
+            "арены виртуальной реальности VR Zion.\n\n"
+            f"Задача пользователя: {user_prompt}\n\n"
+            "Сделай:\n"
+            "- готовый пост на русском языке;\n"
+            "- без лишних пояснений и списков, если это не нужно;\n"
+            "- тёплый, вовлекающий, грамотный текст;\n"
+            "- не выдумывай факты, которых нет в задаче пользователя;\n"
+            "- не упоминай, что это шаблон или что ты ИИ;\n"
+            "- длина: 300–600 знаков;\n"
+            "- стиль: дружелюбный, для родителей и подписчиков;\n"
+            "- используй уместные эмодзи;\n"
+            "- в конце обязательно вставь ссылку на наш сайт vr-zion.ru и адрес: г. Тула, ул. Тургеневская 69Б;\n"
+            "- пиши от имени арены виртуальной реальности VR Zion.\n\n"
+            "Верни только готовый текст поста, без приветствий вроде 'Вот ваш пост'."
+        )
+        if regen_prompt:
+            base += f"\n\nУточнение от оператора: {regen_prompt}"
+        return base
+    
+
     def chat(
         self,
         prompt: str,
@@ -157,3 +181,14 @@ def chat_with_llm(
     history.append({"role": "user", "text": prompt})
     history.append({"role": "assistant", "text": result})
     return result
+
+def generate_free_post(
+    user_prompt: str,
+    regen_prompt: str = "",
+) -> str:
+    """Генерирует свободный пост по описанию пользователя"""
+    prompt = _yandex_llm_service.build_free_prompt(
+        user_prompt=user_prompt,
+        regen_prompt=regen_prompt,
+    )
+    return _yandex_llm_service.chat(prompt)

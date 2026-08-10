@@ -91,7 +91,7 @@ def main() -> None:
                 keyboard = None
 
                 # 1. Команды и кнопки
-                if payload or text.lower() in ["/start", "/старт", "готово", "готово к публикации", "done", "утвердить", "approve", "cancel", "отмена"]:
+                if payload or text.lower() in ["/start", "/старт", "старт", "готово", "готово к публикации", "done", "утвердить", "approve", "cancel", "отмена", "birthday", "free"]:
                     response_text, keyboard = dialog_manager.handle_text(peer_id, from_id, text, payload)
                 
                 # 2. 🔹 СБОР ВЛОЖЕНИЙ С МГНОВЕННЫМ ОТВЕТОМ

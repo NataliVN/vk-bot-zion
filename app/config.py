@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 def _csv_ints(value: str | None) -> list[int]:
     if not value:

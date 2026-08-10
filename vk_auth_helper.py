@@ -25,7 +25,7 @@ def main():
     auth_url = (
         f"https://id.vk.com/authorize?response_type=code"
         f"&client_id={CLIENT_ID}"
-        f"&scope=photos,wall,messages,groups,offline"
+        f"&scope=photos,wall,messages,groups,offline,video"
         f"&redirect_uri=https://oauth.vk.com/blank.html"
         f"&state=12345"
         f"&code_challenge={code_challenge}"
@@ -85,7 +85,7 @@ def main():
         
         expires_at = int(time.time()) + data.get('expires_in', 3600)
         set_key(env_file, "VK_TOKEN_EXPIRES_AT", str(expires_at), quote_mode="never")
-                
+
         print("✅ Токены успешно и чисто записаны в файл .env!")
         
         print("\n⚠️ ВАЖНО: Серверам VK требуется 3-5 минут на синхронизацию нового токена.")
