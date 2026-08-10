@@ -11,6 +11,8 @@ from vk_api.utils import get_random_id
 from app.config import settings
 from app.dialog import DialogManager
 
+from app.database import init_db
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +53,8 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
 
+    init_db()
+
     if not settings.vk_group_id or not settings.vk_group_token:
         logger.error("❌ VK_GROUP_ID или VK_GROUP_TOKEN не заданы в .env")
         return
@@ -63,8 +67,8 @@ def main() -> None:
     longpoll = VkBotLongPoll(vk_community, settings.vk_group_id)
     dialog_manager = DialogManager(vk_community, vk_user)
 
-    from app.token_manager import start_background_refresh
-    start_background_refresh(interval_days=7)
+    from app.token_manager import token_manager
+    token_manager.start_background_refresh()
 
     logger.info("✅ Бот успешно запущен и подключен к Long Poll. Ожидаю сообщения...")
 
@@ -91,7 +95,7 @@ def main() -> None:
                 keyboard = None
 
                 # 1. Команды и кнопки
-                if payload or text.lower() in ["/start", "/старт", "старт", "готово", "готово к публикации", "done", "утвердить", "approve", "cancel", "отмена", "birthday", "free"]:
+                if payload or text.lower() in ["/start", "/старт", "старт", "готово", "готово к публикации", "done", "утвердить", "approve", "cancel", "отмена", "birthday", "free", "/auth", "/авторизация", "авторизация", "/check", "/статус", "/status", "/reauth", "/переавторизация"]:
                     response_text, keyboard = dialog_manager.handle_text(peer_id, from_id, text, payload)
                 
                 # 2. 🔹 СБОР ВЛОЖЕНИЙ С МГНОВЕННЫМ ОТВЕТОМ

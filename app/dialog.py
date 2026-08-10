@@ -4,11 +4,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re  # 🔹 ДОБАВЛЕНО для извлечения кода из URL
 import requests
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional, Tuple
+from urllib.parse import urlparse, parse_qs  # 🔹 ДОБАВЬТЕ ЭТУ СТРОКУ СЮДА
 
 import vk_api
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
@@ -24,7 +26,7 @@ logger = logging.getLogger(__name__)
 class Draft:
     vk_user_id: int
     peer_id: int
-    draft_type: str = ""  # "birthday" или "free"
+    draft_type: str = ""  # "birthday", "free" или "auth"
     child_name: str = ""
     child_age: str = ""
     event_date: str = ""
@@ -38,6 +40,7 @@ class Draft:
     publish_at_text: str = ""
     publish_at_ts: int = 0
     regen_prompt: str = ""
+    pkce_verifier: str = ""  # 🔹 ДОБАВЛЕНО: для хранения кода проверки PKCE
 
 
 class DialogManager:
@@ -59,7 +62,13 @@ class DialogManager:
     def is_allowed_user(self, user_id: int) -> bool:
         return user_id in settings.admin_user_ids
 
-    # 🔹 НОВОЕ МЕНЮ ВЫБОРА ТИПА ПОСТА
+    def _make_keyboard_auth_only(self) -> str:
+        """Клавиатура для неавторизованных пользователей (только кнопка Авторизация)"""
+        keyboard = VkKeyboard(one_time=False)
+        keyboard.add_button("🔐 Авторизация", color=VkKeyboardColor.POSITIVE, payload='{"action":"auth"}')
+        return keyboard.get_keyboard()
+
+     # 🔹 ОБНОВЛЕННОЕ МЕНЮ С КНОПКОЙ АВТОРИЗАЦИИ
     def _make_keyboard_menu(self) -> str:
         keyboard = VkKeyboard(one_time=False)
         keyboard.add_button("🎂 Пост про день рождения", color=VkKeyboardColor.PRIMARY, payload='{"action":"birthday"}')
@@ -118,11 +127,20 @@ class DialogManager:
         if not self.is_allowed_user(user_id):
             return None, None
         self._reset_draft(peer_id, user_id)
+        
+        # 🔹 ПРОВЕРЯЕМ, ЕСТЬ ЛИ У ПОЛЬЗОВАТЕЛЯ ТОКЕН
+        if not token_manager.has_token(user_id):
+            return (
+                "👋 Привет! Для работы с ботом необходима авторизация.\n\n"
+                "Нажмите кнопку ниже, чтобы пройти авторизацию через VK.\n"
+                "Это нужно сделать только один раз."
+            ), self._make_keyboard_auth_only()
+        
         return (
             "👋 Привет! Выберите тип поста, который хотите создать:",
             self._make_keyboard_menu()
         )
-
+    
     def handle_text(self, peer_id: int, user_id: int, text: str, payload: Any = None) -> Tuple[Optional[str], Optional[str]]:
         if not self.is_allowed_user(user_id):
             return None, None
@@ -132,8 +150,34 @@ class DialogManager:
         clean_text = text.lower()
         action = self._parse_payload_action(payload)
 
+        # 🔹 КОМАНДА: ПРОВЕРКА СТАТУСА АВТОРИЗАЦИИ
+        if clean_text in ["/check", "/статус", "/status"]:
+            health = token_manager.check_token_health(user_id)
+            
+            if health["status"] == "valid":
+                return (
+                    f"✅ **Статус авторизации:**\n\n"
+                    f"{health['message']}\n\n"
+                    f"Всё работает, можете создавать посты!"
+                ), self._make_keyboard_menu() if token_manager.has_token(user_id) else self._make_keyboard_auth_only()
+            else:
+                return (
+                    f"⚠️ **Статус авторизации:**\n\n"
+                    f"{health['message']}\n\n"
+                    f"Напишите /auth, чтобы пройти авторизацию заново."
+                ), self._make_keyboard_auth_only()
+
+        # 🔹 КОМАНДА: ПРИНУДИТЕЛЬНАЯ ПЕРЕАВТОРИЗАЦИЯ
+        if clean_text in ["/reauth", "/переавторизация"]:
+            # Удаляем старый токен, если есть
+            from app.database import delete_user_token
+            delete_user_token(user_id)
+            logger.info(f"🗑 Старый токен пользователя {user_id} удалён по запросу /reauth")
+            # Запускаем процесс авторизации
+            action = "auth"  # Перенаправляем на обработку auth
+
         # 🔹 СТАРТ ИЛИ ВЫБОР ТИПА ПОСТА
-        if action == "start" or clean_text in ["старт","/start", "/старт", "создать отложенный пост"]:
+        if action == "start" or clean_text in ["старт", "/start", "/старт", "создать отложенный пост"]:
             return self.start(peer_id, user_id)
 
         if action == "birthday":
@@ -155,6 +199,50 @@ class DialogManager:
                 "• «Напиши анонс акции на выходные — скидка 20%»\n"
                 "• «Поблагодари гостей за вчерашний день рождения Пети»\n\n"
                 "Или нажмите ❌ Отмена"
+            ), self._make_keyboard_cancel()
+
+        # 🔹 АВТОРИЗАЦИЯ СОТРУДНИКА ЧЕРЕЗ PKCE (как в vk_auth_helper.py)
+        if action == "auth" or clean_text in ["/auth", "/авторизация", "авторизация"]:
+            import secrets
+            import hashlib
+            import base64
+            import urllib.parse
+
+            draft.draft_type = "auth"
+            draft.status = "awaiting_auth_code"
+            
+            # 1. Генерируем code_verifier (случайная строка)
+            code_verifier = secrets.token_urlsafe(64)
+            
+            # 2. Генерируем code_challenge (SHA256 хэш от verifier, закодированный в base64url без =)
+            code_challenge = base64.urlsafe_b64encode(
+                hashlib.sha256(code_verifier.encode('utf-8')).digest()
+            ).decode('utf-8').rstrip('=')
+            
+            # 3. Сохраняем verifier в черновик, чтобы использовать его при обмене кода
+            draft.pkce_verifier = code_verifier
+            
+            # 4. Формируем параметры точно как в рабочей ссылке
+            oauth_params = {
+                "response_type": "code",
+                "client_id": settings.vk_client_id,
+                "scope": "photos,wall,messages,groups,offline,video",
+                "redirect_uri": "https://oauth.vk.com/blank.html",
+                "state": str(user_id),
+                "code_challenge": code_challenge,
+                "code_challenge_method": "S256"
+            }
+            
+            # Используем современный домен id.vk.com
+            auth_url = f"https://id.vk.com/authorize?{urllib.parse.urlencode(oauth_params)}"
+            
+            return (
+                "🔐 **Авторизация сотрудника (PKCE)**\n\n"
+                "1️⃣ Перейдите по ссылке и нажмите 'Разрешить':\n"
+                f"{auth_url}\n\n"
+                "2️⃣ После разрешения вас перекинет на пустую страницу.\n"
+                "3️⃣ Скопируйте **весь текст из адресной строки браузера** (он будет содержать `https://oauth.vk.com/blank.html#code=...` или `?code=...`) и отправьте его мне.\n\n"
+                "Или нажмите ❌ Отмена."
             ), self._make_keyboard_cancel()
 
         if action == "cancel":
@@ -275,11 +363,61 @@ class DialogManager:
                         f"🔗 Ссылка на отложенный пост: {post_link}\n\n"
                         f"Вы можете начать создание нового поста, нажав кнопку ниже."
                     ), self._make_keyboard_start()
+                except ValueError as e:
+                    # Специальная обработка: токен протух
+                    if "истёк" in str(e).lower() or "не может быть обновлён" in str(e).lower():
+                        logger.warning(f"⚠️ Токен пользователя {user_id} протух при создании поста")
+                        return (
+                            "⚠️ **Ваш токен истёк и не может быть обновлён.**\n\n"
+                            "Пожалуйста, пройдите авторизацию заново:\n"
+                            "Напишите /auth\n\n"
+                            "После этого вы сможете продолжить создание поста."
+                        ), self._make_keyboard_auth_only()
+                    else:
+                        logger.exception("Ошибка создания отложенного поста")
+                        return f"Не удалось создать пост: {e}", self._make_keyboard_assets()
                 except Exception as e:
                     logger.exception("Ошибка создания отложенного поста")
-                    return f"Не удалось создать пост: {e}", self._make_keyboard_assets()
-            return "Пришлите фото или видео, или нажмите <Готово к публикации>.", self._make_keyboard_assets()
+                    return f"Не удалось создать пост: {e}", self._make_keyboard_assets()            
 
+                return "Пришлите фото или видео, или нажмите <Готово к публикации>.", self._make_keyboard_assets()
+
+         # 🔹 ОБРАБОТКА ПОЛУЧЕННОЙ ССЫЛКИ С КОДОМ И DEVICE_ID
+        if draft.status == "awaiting_auth_code":
+            # Используем напрямую импортированные функции, как в рабочем скрипте
+            parsed = urlparse(text)
+            
+            # Объединяем query (?) и fragment (#), так как VK может вернуть код в любой части URL
+            query_params = parse_qs(parsed.query)
+            fragment_params = parse_qs(parsed.fragment)
+            
+            # Ищем code и device_id в любой из частей (берем первый элемент списка)
+            auth_code = query_params.get('code', [None])[0] or fragment_params.get('code', [None])[0]
+            device_id = query_params.get('device_id', [None])[0] or fragment_params.get('device_id', [None])[0]
+            
+            if not auth_code or not device_id:
+                return (
+                    "❌ Не удалось найти параметры 'code' или 'device_id' в вашей ссылке.\n\n"
+                    "Пожалуйста, скопируйте **всю адресную строку** ПОСЛЕ нажатия кнопки 'Разрешить' и отправьте её.\n"
+                    "Или напишите /auth, чтобы начать заново."
+                ), self._make_keyboard_cancel()
+            
+            # Пытаемся обменять код на токен, передавая ВСЕ необходимые параметры
+            success = token_manager.exchange_code_for_token(user_id, auth_code, draft.pkce_verifier, device_id)
+            
+            if success:
+                self._reset_draft(peer_id, user_id) # Сбрасываем черновик
+                return (
+                    "🎉 **Авторизация успешна!**\n\n"
+                    "Теперь бот может прикреплять ваши видео к постам.\n"
+                    "Вы можете начать создание поста, нажав /start."
+                ), self._make_keyboard_start()
+            else:
+                return (
+                    "❌ Не удалось получить токен. Возможно, код устарел или неверен.\n\n"
+                    "Попробуйте пройти авторизацию заново: напишите /auth"
+                ), self._make_keyboard_cancel()
+                        
         if draft.status == "scheduled":
             return "Пост уже запланирован. Можете создать новый.", self._make_keyboard_start()
 
@@ -315,7 +453,9 @@ class DialogManager:
         os.makedirs(settings.upload_dir, exist_ok=True)
         new_attachment_strings, success_names, fail_names = [], [], []
         group_id = abs(int(settings.vk_group_id))
-        user_token = token_manager.get_valid_token()
+        
+        # 🔹 ИСПОЛЬЗУЕМ ТОКЕН КОНКРЕТНОГО ПОЛЬЗОВАТЕЛЯ
+        user_token = token_manager.get_valid_token(user_id)
 
         try:
             from pillow_heif import register_heif_opener
@@ -534,7 +674,8 @@ class DialogManager:
         return "\n".join(report_lines), self._make_keyboard_assets()
 
     def _create_scheduled_post(self, draft: Draft) -> int:
-        user_token = token_manager.get_valid_token()
+        # 🔹 ИСПОЛЬЗУЕМ ТОКЕН КОНКРЕТНОГО ПОЛЬЗОВАТЕЛЯ
+        user_token = token_manager.get_valid_token(draft.vk_user_id)
         post_params = {
             "owner_id": -abs(int(settings.vk_group_id)),
             "from_group": 1,
@@ -547,7 +688,7 @@ class DialogManager:
         if draft.attachment_string:
             post_params["attachments"] = draft.attachment_string
 
-        response = requests.post("https://api.vk.com/method/wall.post", data=post_params).json()
+        response = requests.post("https://api.vk.com/method/wall.post", data=post_params, timeout=15).json()
         if "error" in response:
             raise Exception(f"Ошибка wall.post: {response['error'].get('error_msg', response['error'])}")
         return int(response["response"].get("post_id", 0))
