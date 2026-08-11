@@ -4,13 +4,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re  # 🔹 ДОБАВЛЕНО для извлечения кода из URL
+import re
 import requests
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional, Tuple
-from urllib.parse import urlparse, parse_qs  # 🔹 ДОБАВЬТЕ ЭТУ СТРОКУ СЮДА
+from urllib.parse import urlparse, parse_qs
 
 import vk_api
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
@@ -40,7 +40,7 @@ class Draft:
     publish_at_text: str = ""
     publish_at_ts: int = 0
     regen_prompt: str = ""
-    pkce_verifier: str = ""  # 🔹 ДОБАВЛЕНО: для хранения кода проверки PKCE
+    pkce_verifier: str = ""  # Для хранения кода проверки PKCE
 
 
 class DialogManager:
@@ -63,12 +63,11 @@ class DialogManager:
         return user_id in settings.admin_user_ids
 
     def _make_keyboard_auth_only(self) -> str:
-        """Клавиатура для неавторизованных пользователей (только кнопка Авторизация)"""
+        """Клавиатура для неавторизованных пользователей"""
         keyboard = VkKeyboard(one_time=False)
         keyboard.add_button("🔐 Авторизация", color=VkKeyboardColor.POSITIVE, payload='{"action":"auth"}')
         return keyboard.get_keyboard()
 
-     # 🔹 ОБНОВЛЕННОЕ МЕНЮ С КНОПКОЙ АВТОРИЗАЦИИ
     def _make_keyboard_menu(self) -> str:
         keyboard = VkKeyboard(one_time=False)
         keyboard.add_button("🎂 Пост про день рождения", color=VkKeyboardColor.PRIMARY, payload='{"action":"birthday"}')
@@ -106,7 +105,6 @@ class DialogManager:
         return keyboard.get_keyboard()
 
     def _make_keyboard_cancel(self) -> str:
-        """Клавиатура для этапов ввода данных (только кнопка Отмена)"""
         keyboard = VkKeyboard(one_time=False)
         keyboard.add_button("❌ Отмена", color=VkKeyboardColor.NEGATIVE, payload='{"action":"cancel"}')
         return keyboard.get_keyboard()
@@ -128,7 +126,6 @@ class DialogManager:
             return None, None
         self._reset_draft(peer_id, user_id)
         
-        # 🔹 ПРОВЕРЯЕМ, ЕСТЬ ЛИ У ПОЛЬЗОВАТЕЛЯ ТОКЕН
         if not token_manager.has_token(user_id):
             return (
                 "👋 Привет! Для работы с ботом необходима авторизация.\n\n"
@@ -153,7 +150,6 @@ class DialogManager:
         # 🔹 КОМАНДА: ПРОВЕРКА СТАТУСА АВТОРИЗАЦИИ
         if clean_text in ["/check", "/статус", "/status"]:
             health = token_manager.check_token_health(user_id)
-            
             if health["status"] == "valid":
                 return (
                     f"✅ **Статус авторизации:**\n\n"
@@ -169,12 +165,10 @@ class DialogManager:
 
         # 🔹 КОМАНДА: ПРИНУДИТЕЛЬНАЯ ПЕРЕАВТОРИЗАЦИЯ
         if clean_text in ["/reauth", "/переавторизация"]:
-            # Удаляем старый токен, если есть
             from app.database import delete_user_token
             delete_user_token(user_id)
             logger.info(f"🗑 Старый токен пользователя {user_id} удалён по запросу /reauth")
-            # Запускаем процесс авторизации
-            action = "auth"  # Перенаправляем на обработку auth
+            action = "auth"
 
         # 🔹 СТАРТ ИЛИ ВЫБОР ТИПА ПОСТА
         if action == "start" or clean_text in ["старт", "/start", "/старт", "создать отложенный пост"]:
@@ -196,12 +190,11 @@ class DialogManager:
                 "✍️ Опишите, о чём должен быть пост, в свободной форме.\n\n"
                 "Например:\n"
                 "• «Расскажи о нашем новом аттракционе VR-качели»\n"
-                "• «Напиши анонс акции на выходные — скидка 20%»\n"
-                "• «Поблагодари гостей за вчерашний день рождения Пети»\n\n"
+                "• «Напиши анонс акции на выходные — скидка 20%»\n\n"
                 "Или нажмите ❌ Отмена"
             ), self._make_keyboard_cancel()
 
-        # 🔹 АВТОРИЗАЦИЯ СОТРУДНИКА ЧЕРЕЗ PKCE (как в vk_auth_helper.py)
+        # 🔹 АВТОРИЗАЦИЯ СОТРУДНИКА ЧЕРЕЗ PKCE
         if action == "auth" or clean_text in ["/auth", "/авторизация", "авторизация"]:
             import secrets
             import hashlib
@@ -211,18 +204,13 @@ class DialogManager:
             draft.draft_type = "auth"
             draft.status = "awaiting_auth_code"
             
-            # 1. Генерируем code_verifier (случайная строка)
             code_verifier = secrets.token_urlsafe(64)
-            
-            # 2. Генерируем code_challenge (SHA256 хэш от verifier, закодированный в base64url без =)
             code_challenge = base64.urlsafe_b64encode(
                 hashlib.sha256(code_verifier.encode('utf-8')).digest()
             ).decode('utf-8').rstrip('=')
             
-            # 3. Сохраняем verifier в черновик, чтобы использовать его при обмене кода
             draft.pkce_verifier = code_verifier
             
-            # 4. Формируем параметры точно как в рабочей ссылке
             oauth_params = {
                 "response_type": "code",
                 "client_id": settings.vk_client_id,
@@ -233,7 +221,6 @@ class DialogManager:
                 "code_challenge_method": "S256"
             }
             
-            # Используем современный домен id.vk.com
             auth_url = f"https://id.vk.com/authorize?{urllib.parse.urlencode(oauth_params)}"
             
             return (
@@ -241,7 +228,7 @@ class DialogManager:
                 "1️⃣ Перейдите по ссылке и нажмите 'Разрешить':\n"
                 f"{auth_url}\n\n"
                 "2️⃣ После разрешения вас перекинет на пустую страницу.\n"
-                "3️⃣ Скопируйте **весь текст из адресной строки браузера** (он будет содержать `https://oauth.vk.com/blank.html#code=...` или `?code=...`) и отправьте его мне.\n\n"
+                "3️⃣ Скопируйте **весь текст из адресной строки браузера** и отправьте его мне.\n\n"
                 "Или нажмите ❌ Отмена."
             ), self._make_keyboard_cancel()
 
@@ -284,14 +271,15 @@ class DialogManager:
             draft.status = "awaiting_review"
             return f"Черновик готов:\n\n{draft.post_text}\n\nВыберите действие:", self._make_keyboard_review()
 
-        # 🔹 СОСТОЯНИЕ: РЕВЬЮ ЧЕРНОВИКА (ОБЩЕЕ ДЛЯ ОБИИХ ТИПОВ)
+        # 🔹 СОСТОЯНИЕ: РЕВЬЮ ЧЕРНОВИКА
         if draft.status == "awaiting_review":
             if clean_text in ["/approve", "approve", "утвердить"]:
                 draft.status = "awaiting_time"
                 return (
                     "Отлично! Теперь укажите дату и время публикации.\n\n"
                     "Вы можете нажать кнопку «📅 Завтра в это же время» ниже,\n"
-                    "или ввести вручную в формате: ДД.ММ ЧЧ:ММ (например: 25.08 18:30)"
+                    "или ввести вручную в формате: ДД.ММ ЧЧ:ММ или ДД.ММ.ГГГГ ЧЧ:ММ (например: 25.08 18:30)\n\n"
+                    "⚠️ VK позволяет планировать посты максимум на 6 месяцев вперёд."
                 ), self._make_keyboard_time()
             if clean_text in ["/edit", "edit", "редактировать"]:
                 draft.status = "awaiting_manual_edit"
@@ -299,9 +287,9 @@ class DialogManager:
             if clean_text in ["/regen", "regen", "перегенерировать"]:
                 draft.status = "awaiting_regen_prompt"
                 return "Введите уточняющий промпт. Если без уточнений, напишите «без».", None
-            return "Используй кнопки: Утвердить, Редактировать, Перегенерировать или Отмена.", self._make_keyboard_review()
+            return "Используйте кнопки: Утвердить, Редактировать, Перегенерировать или Отмена.", self._make_keyboard_review()
 
-        # 🔹 СОСТОЯНИЕ: ВЫБОР ВРЕМЕНИ
+        # 🔹 СОСТОЯНИЕ: ВЫБОР ВРЕМЕНИ (С ПРОВЕРКОЙ ДИАПАЗОНА VK)
         if draft.status == "awaiting_time":
             if action == "tomorrow":
                 tomorrow = datetime.now() + timedelta(days=1)
@@ -310,7 +298,6 @@ class DialogManager:
                 draft.status = "awaiting_assets"
                 return f"⏰ Отлично! Пост будет опубликован: {draft.publish_at_text}\n\nТеперь пришлите фото и/или видео отдельным сообщением.", self._make_keyboard_assets()
             
-            # 🔹 УМНЫЙ ПАРСИНГ ДАТЫ (с поддержкой года и автопереносом)
             dt_obj = None
             
             # Вариант 1: С годом (ДД.ММ.ГГГГ ЧЧ:ММ)
@@ -325,14 +312,12 @@ class DialogManager:
                     current_year = datetime.now().year
                     dt_obj = datetime.strptime(text, "%d.%m %H:%M").replace(year=current_year)
                     
-                    # 🔹 УМНАЯ ЛОГИКА: если дата в прошлом в текущем году, переносим на следующий
                     if dt_obj.timestamp() <= datetime.now().timestamp():
                         dt_obj = dt_obj.replace(year=current_year + 1)
                         logger.info(f"📅 Дата {text} в текущем году уже прошла, перенесено на {dt_obj.year} год")
                 except ValueError:
                     pass
             
-            # Если ни один формат не подошёл
             if dt_obj is None:
                 return (
                     "⚠️ Неверный формат даты.\n\n"
@@ -342,18 +327,32 @@ class DialogManager:
                     "Или нажмите кнопку «📅 Завтра в это же время»."
                 ), self._make_keyboard_time()
             
-            # Финальная проверка: дата не должна быть в прошлом
-            if dt_obj.timestamp() <= datetime.now().timestamp():
+            # 🔹 ПРОВЕРКА ДИАПАЗОНА ДЛЯ VK API (минимум 15 мин, максимум 6 месяцев)
+            now = datetime.now()
+            min_date = now + timedelta(minutes=15)
+            max_date = now + timedelta(days=180)
+            
+            if dt_obj < min_date:
                 return (
-                    "⚠️ Указанное время уже прошло. Укажите дату в будущем.\n\n"
-                    "Используйте формат:\n"
-                    "• `ДД.ММ ЧЧ:ММ` (например: `25.08 18:30`)\n"
-                    "• `ДД.ММ.ГГГГ ЧЧ:ММ` (например: `25.08.2027 18:30`)"
+                    f"⚠️ Дата слишком близкая. VK требует, чтобы пост был запланирован минимум через 15 минут.\n\n"
+                    f"Сейчас: {now.strftime('%d.%m.%Y %H:%M')}\n"
+                    f"Минимальная дата: {min_date.strftime('%d.%m.%Y %H:%M')}\n\n"
+                    f"Укажите более позднюю дату или нажмите «📅 Завтра в это же время»."
+                ), self._make_keyboard_time()
+            
+            if dt_obj > max_date:
+                return (
+                    f"⚠️ Дата слишком далёкая. VK позволяет планировать посты максимум на 6 месяцев вперёд.\n\n"
+                    f"Максимальная дата: {max_date.strftime('%d.%m.%Y')}\n\n"
+                    f"Укажите более раннюю дату."
                 ), self._make_keyboard_time()
             
             draft.publish_at_ts = int(dt_obj.timestamp())
             draft.publish_at_text = dt_obj.strftime("%d.%m.%Y в %H:%M")
             draft.status = "awaiting_assets"
+            
+            logger.info(f"📅 Запланировано: {draft.publish_at_text} (timestamp: {draft.publish_at_ts}, сейчас: {int(now.timestamp())})")
+            
             return f"⏰ Отлично! Пост будет опубликован: {draft.publish_at_text}\n\nТеперь пришлите фото и/или видео отдельным сообщением.", self._make_keyboard_assets()
         
         # 🔹 СОСТОЯНИЕ: РЕДАКТИРОВАНИЕ ТЕКСТА
@@ -373,7 +372,7 @@ class DialogManager:
                         child_name=draft.child_name, child_age=draft.child_age,
                         event_date=draft.event_date, fact=draft.fact, regen_prompt=draft.regen_prompt
                     )
-                else:  # free
+                else:
                     draft.post_text = generate_free_post(
                         user_prompt=draft.user_prompt, regen_prompt=draft.regen_prompt
                     )
@@ -400,14 +399,12 @@ class DialogManager:
                         f"Вы можете начать создание нового поста, нажав кнопку ниже."
                     ), self._make_keyboard_start()
                 except ValueError as e:
-                    # Специальная обработка: токен протух
                     if "истёк" in str(e).lower() or "не может быть обновлён" in str(e).lower():
                         logger.warning(f"⚠️ Токен пользователя {user_id} протух при создании поста")
                         return (
                             "⚠️ **Ваш токен истёк и не может быть обновлён.**\n\n"
                             "Пожалуйста, пройдите авторизацию заново:\n"
-                            "Напишите /auth\n\n"
-                            "После этого вы сможете продолжить создание поста."
+                            "Напишите /auth"
                         ), self._make_keyboard_auth_only()
                     else:
                         logger.exception("Ошибка создания отложенного поста")
@@ -416,18 +413,14 @@ class DialogManager:
                     logger.exception("Ошибка создания отложенного поста")
                     return f"Не удалось создать пост: {e}", self._make_keyboard_assets()            
 
-                return "Пришлите фото или видео, или нажмите <Готово к публикации>.", self._make_keyboard_assets()
+            return "Пришлите фото или видео, или нажмите <Готово к публикации>.", self._make_keyboard_assets()
 
-         # 🔹 ОБРАБОТКА ПОЛУЧЕННОЙ ССЫЛКИ С КОДОМ И DEVICE_ID
+        # 🔹 ОБРАБОТКА ПОЛУЧЕННОЙ ССЫЛКИ С КОДОМ И DEVICE_ID
         if draft.status == "awaiting_auth_code":
-            # Используем напрямую импортированные функции, как в рабочем скрипте
             parsed = urlparse(text)
-            
-            # Объединяем query (?) и fragment (#), так как VK может вернуть код в любой части URL
             query_params = parse_qs(parsed.query)
             fragment_params = parse_qs(parsed.fragment)
             
-            # Ищем code и device_id в любой из частей (берем первый элемент списка)
             auth_code = query_params.get('code', [None])[0] or fragment_params.get('code', [None])[0]
             device_id = query_params.get('device_id', [None])[0] or fragment_params.get('device_id', [None])[0]
             
@@ -438,11 +431,10 @@ class DialogManager:
                     "Или напишите /auth, чтобы начать заново."
                 ), self._make_keyboard_cancel()
             
-            # Пытаемся обменять код на токен, передавая ВСЕ необходимые параметры
             success = token_manager.exchange_code_for_token(user_id, auth_code, draft.pkce_verifier, device_id)
             
             if success:
-                self._reset_draft(peer_id, user_id) # Сбрасываем черновик
+                self._reset_draft(peer_id, user_id)
                 return (
                     "🎉 **Авторизация успешна!**\n\n"
                     "Теперь бот может прикреплять ваши видео к постам.\n"
@@ -489,8 +481,6 @@ class DialogManager:
         os.makedirs(settings.upload_dir, exist_ok=True)
         new_attachment_strings, success_names, fail_names = [], [], []
         group_id = abs(int(settings.vk_group_id))
-        
-        # 🔹 ИСПОЛЬЗУЕМ ТОКЕН КОНКРЕТНОГО ПОЛЬЗОВАТЕЛЯ
         user_token = token_manager.get_valid_token(user_id)
 
         try:
@@ -504,7 +494,6 @@ class DialogManager:
 
         for i, att in enumerate(attachments):
             att_type = att.get("type")
-            # Читаемое имя для отчета
             if att_type == "photo":
                 att_name = f"Фото {i+1}"
             elif att_type == "video":
@@ -710,13 +699,20 @@ class DialogManager:
         return "\n".join(report_lines), self._make_keyboard_assets()
 
     def _create_scheduled_post(self, draft: Draft) -> int:
-        # 🔹 ИСПОЛЬЗУЕМ ТОКЕН КОНКРЕТНОГО ПОЛЬЗОВАТЕЛЯ
         user_token = token_manager.get_valid_token(draft.vk_user_id)
+        
+        publish_date = int(draft.publish_at_ts)
+        now_ts = int(datetime.now().timestamp())
+        
+        logger.info(f"📤 wall.post параметры: owner_id=-{abs(int(settings.vk_group_id))}, "
+                     f"publish_date={publish_date}, сейчас={now_ts}, "
+                     f"разница={publish_date - now_ts} сек")
+        
         post_params = {
             "owner_id": -abs(int(settings.vk_group_id)),
             "from_group": 1,
             "message": draft.post_text,
-            "publish_date": draft.publish_at_ts,
+            "publish_date": publish_date,
             "random_id": int(time.time() * 1000000),
             "access_token": user_token,
             "v": "5.199"
@@ -725,6 +721,9 @@ class DialogManager:
             post_params["attachments"] = draft.attachment_string
 
         response = requests.post("https://api.vk.com/method/wall.post", data=post_params, timeout=15).json()
+        
+        logger.info(f"📥 Ответ VK: {response}")
+        
         if "error" in response:
             raise Exception(f"Ошибка wall.post: {response['error'].get('error_msg', response['error'])}")
         return int(response["response"].get("post_id", 0))
@@ -735,7 +734,6 @@ class DialogManager:
         user_link = f"https://vk.com/id{draft.vk_user_id}"
         user_display = f"[id{draft.vk_user_id}|ID: {draft.vk_user_id}]"
 
-        # 🔹 ТИП ПОСТА
         if draft.draft_type == "birthday":
             post_type = "🎂 Пост про день рождения"
             details = (
@@ -746,7 +744,6 @@ class DialogManager:
             )
         else:
             post_type = "✍️ Свободный пост"
-            # Показываем первые 100 символов промпта
             prompt_short = draft.user_prompt[:100] + ("..." if len(draft.user_prompt) > 100 else "")
             details = f"📝 Промпт: {prompt_short}\n"
 

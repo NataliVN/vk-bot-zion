@@ -1,184 +1,35 @@
-# ==========================================
-# 🔴 СЕКРЕТЫ И БАЗА ДАННЫХ (НИКОГДА НЕ КОММИТИТЬ!)
-# ==========================================
-# Эти файлы содержат токены и пароли — их нельзя выкладывать в публичные репозитории!
-.env
-.env.local
-.env.*
-users.db
-*.db
-*.sqlite
-*.sqlite3
-
-# ==========================================
-# 🗂 ВРЕМЕННЫЕ ФАЙЛЫ МЕДИА И ЛОГИ
-# ==========================================
-# Бот создаёт эти файлы при загрузке фото/видео — они не нужны в репозитории
-media/temp_videos/
-media/temp_*
-media/*.jpg
-media/*.png
-media/*.heic
-media/*.mp4
-media/*.mov
-logs/
-*.log
-
-# ==========================================
-# 💻 СИСТЕМНЫЕ ФАЙЛЫ ОС
-# ==========================================
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# ==========================================
-# 🐍 PYTHON
-# ==========================================
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[codz]
-*$py.class
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed_cfg
-*.egg
-MANIFEST
-
-# ==========================================
-# 🌐 ВИРТУАЛЬНЫЕ ОКРУЖЕНИЯ
-# ==========================================
-.venv/
-venv/
-ENV/
-env/
-env.bak/
-venv.bak/
-.envrc
-.python-version
-
-# ==========================================
-# 🛠 ИНСТРУМЕНТЫ РАЗРАБОТКИ И ТЕСТОВ
-# ==========================================
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.cover
-.hypothesis/
-.pytest_cache/
-cover/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# pyenv
-# .python-version
-
-# Environments
-.envrc
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# Ruff
-.ruff_cache/
-
-# ==========================================
-# 🎨 IDE И РЕДАКТОРЫ
-# ==========================================
-# VS Code
-.vscode/
-tempCodeRunnerFile.py
-
-# PyCharm
-.idea/
-
-# Spyder
-.spyderproject
-.spyproject
-
-# Rope
-.ropeproject
-
-# ==========================================
-# 📚 ДОКУМЕНТАЦИЯ И ПРОЧЕЕ
-# ==========================================
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# mkdocs documentation
-/site
-
-# Streamlit
-.streamlit/secrets.toml
-
-# Abstra
-.abstra/
-
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
-
-# PyPI configuration file
-.pypirc
-
-# ==========================================
-# 🧪 ТЕСТОВЫЕ СКРИПТЫ (ваш старый код)
-# ==========================================
+# Старые версии и тестовые файлы
+old version/
+test_*.py
+check_*.py
 vk_test*.py
 vk_token*.py
 token_script.py
-test_*.py
-check_*.py
-test_video_upload.py
-test_db.py
+
+# Медиа-файлы (временные загрузки)
+media/
+uploads/
+*.jpg
+*.png
+*.heic
+*.mp4
+*.mov
+
+# База данных и секреты
+users.db
+.env
+.env.local
+
+# Виртуальное окружение
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Логи
+logs/
+*.log
+
+# Системные файлы
+.DS_Store
+Thumbs.db
