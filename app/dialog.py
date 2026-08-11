@@ -309,17 +309,53 @@ class DialogManager:
                 draft.publish_at_text = tomorrow.strftime("Завтра, %d.%m.%Y в %H:%M")
                 draft.status = "awaiting_assets"
                 return f"⏰ Отлично! Пост будет опубликован: {draft.publish_at_text}\n\nТеперь пришлите фото и/или видео отдельным сообщением.", self._make_keyboard_assets()
+            
+            # 🔹 УМНЫЙ ПАРСИНГ ДАТЫ (с поддержкой года и автопереносом)
+            dt_obj = None
+            
+            # Вариант 1: С годом (ДД.ММ.ГГГГ ЧЧ:ММ)
             try:
-                dt_obj = datetime.strptime(text, "%d.%m %H:%M").replace(year=datetime.now().year)
-                if dt_obj.timestamp() <= datetime.now().timestamp():
-                    return "⚠️ Указанное время уже прошло. Укажите дату в будущем (ДД.ММ ЧЧ:ММ) или нажмите «Завтра».", self._make_keyboard_time()
-                draft.publish_at_ts = int(dt_obj.timestamp())
-                draft.publish_at_text = dt_obj.strftime("%d.%m.%Y в %H:%M")
-                draft.status = "awaiting_assets"
-                return f"⏰ Отлично! Пост будет опубликован: {draft.publish_at_text}\n\nТеперь пришлите фото и/или видео отдельным сообщением.", self._make_keyboard_assets()
+                dt_obj = datetime.strptime(text, "%d.%m.%Y %H:%M")
             except ValueError:
-                return "⚠️ Неверный формат. Введите как ДД.ММ ЧЧ:ММ (например: 25.08 18:30)\nИли нажмите кнопку «📅 Завтра в это же время».", self._make_keyboard_time()
-
+                pass
+            
+            # Вариант 2: Без года (ДД.ММ ЧЧ:ММ)
+            if dt_obj is None:
+                try:
+                    current_year = datetime.now().year
+                    dt_obj = datetime.strptime(text, "%d.%m %H:%M").replace(year=current_year)
+                    
+                    # 🔹 УМНАЯ ЛОГИКА: если дата в прошлом в текущем году, переносим на следующий
+                    if dt_obj.timestamp() <= datetime.now().timestamp():
+                        dt_obj = dt_obj.replace(year=current_year + 1)
+                        logger.info(f"📅 Дата {text} в текущем году уже прошла, перенесено на {dt_obj.year} год")
+                except ValueError:
+                    pass
+            
+            # Если ни один формат не подошёл
+            if dt_obj is None:
+                return (
+                    "⚠️ Неверный формат даты.\n\n"
+                    "Используйте один из вариантов:\n"
+                    "• `ДД.ММ ЧЧ:ММ` (например: `25.08 18:30`)\n"
+                    "• `ДД.ММ.ГГГГ ЧЧ:ММ` (например: `25.08.2027 18:30`)\n\n"
+                    "Или нажмите кнопку «📅 Завтра в это же время»."
+                ), self._make_keyboard_time()
+            
+            # Финальная проверка: дата не должна быть в прошлом
+            if dt_obj.timestamp() <= datetime.now().timestamp():
+                return (
+                    "⚠️ Указанное время уже прошло. Укажите дату в будущем.\n\n"
+                    "Используйте формат:\n"
+                    "• `ДД.ММ ЧЧ:ММ` (например: `25.08 18:30`)\n"
+                    "• `ДД.ММ.ГГГГ ЧЧ:ММ` (например: `25.08.2027 18:30`)"
+                ), self._make_keyboard_time()
+            
+            draft.publish_at_ts = int(dt_obj.timestamp())
+            draft.publish_at_text = dt_obj.strftime("%d.%m.%Y в %H:%M")
+            draft.status = "awaiting_assets"
+            return f"⏰ Отлично! Пост будет опубликован: {draft.publish_at_text}\n\nТеперь пришлите фото и/или видео отдельным сообщением.", self._make_keyboard_assets()
+        
         # 🔹 СОСТОЯНИЕ: РЕДАКТИРОВАНИЕ ТЕКСТА
         if draft.status == "awaiting_manual_edit":
             if not text:
