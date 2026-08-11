@@ -1,120 +1,148 @@
-from __future__ import annotations
-
-import json
+# app/bot.py
 import logging
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
+import time
+import requests.exceptions
+from typing import Any, Optional
 
 import vk_api
-from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
+from vk_api.bot_longpoll import VkBotEventType, VkBotLongPoll
+from vk_api.utils import get_random_id
 
 from app.config import settings
-from app.storage import init_db
-from app.vk_client import VKClient
 from app.dialog import DialogManager
-from model import chat_with_llm
 
-def setup_logging():
-    Path(settings.log_dir).mkdir(parents=True, exist_ok=True)
-    log_file = Path(settings.log_dir) / "bot.log"
+from app.database import init_db
 
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-    fh = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
-    fh.setFormatter(formatter)
-    fh.setLevel(logging.DEBUG)
 
-    sh = logging.StreamHandler()
-    sh.setFormatter(formatter)
-    sh.setLevel(logging.INFO)
+def get_message_dict(event: Any) -> Optional[dict]:
+    obj = getattr(event, "object", None) or getattr(event, "obj", None)
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get("message") or obj
+    message = getattr(obj, "message", None)
+    if message is not None:
+        if isinstance(message, dict):
+            return message
+        return {
+            "peer_id": getattr(message, "peer_id", None),
+            "from_id": getattr(message, "from_id", None),
+            "text": getattr(message, "text", ""),
+            "payload": getattr(message, "payload", None),
+            "attachments": getattr(message, "attachments", None),
+        }
+    return None
 
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
-    if root.handlers:
-        root.handlers.clear()
-    root.addHandler(fh)
-    root.addHandler(sh)
 
-def main():
-    setup_logging()
+def send_message(vk, peer_id: int, text: str, keyboard: Optional[str] = None) -> None:
+    params = {
+        "peer_id": peer_id,
+        "message": text,
+        "random_id": get_random_id(),
+    }
+    if keyboard:
+        params["keyboard"] = keyboard
+    vk.messages.send(**params)
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO, 
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+
     init_db()
 
-    vk_client = VKClient()
-    dialog = DialogManager(vk_client=vk_client, chat_with_llm=chat_with_llm)
+    if not settings.vk_group_id or not settings.vk_group_token:
+        logger.error("❌ VK_GROUP_ID или VK_GROUP_TOKEN не заданы в .env")
+        return
 
-    session = vk_api.VkApi(token=settings.vk_group_token)
-    longpoll = VkBotLongPoll(session, settings.vk_group_id)
+    vk_community = vk_api.VkApi(token=settings.vk_group_token)
+    vk_user = vk_api.VkApi(token=settings.vk_user_token)
+    
+    vk_community_api = vk_community.get_api()
+    
+    longpoll = VkBotLongPoll(vk_community, settings.vk_group_id)
+    dialog_manager = DialogManager(vk_community, vk_user)
 
-    for event in longpoll.listen():
-        if event.type == VkBotEventType.MESSAGE_NEW:
-            msg = getattr(event.object, "message", None)
-            if not msg:
-                continue
+    from app.token_manager import token_manager
+    token_manager.start_background_refresh()
 
-            peer_id = msg.get("peer_id")
-            user_id = msg.get("from_id")
-            text = (msg.get("text") or "").strip()
+    logger.info("✅ Бот успешно запущен и подключен к Long Poll. Ожидаю сообщения...")
 
-            if text == "/start":
-                response, keyboard = dialog.start(peer_id, user_id)
-                vk_client.send_message(peer_id, response, keyboard)
-                continue
+    while True:
+        try:
+            for event in longpoll.listen():
+                if event.type != VkBotEventType.MESSAGE_NEW:
+                    continue
 
-            attachments = msg.get("attachments") or []
-            if attachments:
-                photo_paths: list[str] = []
-                for attachment in attachments:
-                    if attachment.get("type") == "photo":
-                        photo = attachment.get("photo") or {}
-                        sizes = photo.get("sizes") or []
-                        if not sizes:
-                            continue
-                        best = max(sizes, key=lambda x: x.get("width", 0) * x.get("height", 0))
-                        url = best.get("url")
-                        if not url:
-                            continue
-                        path = dialog.save_incoming_photo(url)
-                        photo_paths.append(path)
+                msg = get_message_dict(event)
+                if not msg:
+                    continue
 
-                response, keyboard = dialog.add_photo_paths(peer_id, user_id, photo_paths)
-                vk_client.send_message(peer_id, response, keyboard)
-                continue
+                peer_id = msg.get("peer_id")
+                from_id = msg.get("from_id")
+                text = (msg.get("text") or "").strip()
+                payload = msg.get("payload")
+                attachments = msg.get("attachments") or []
 
-            payload_raw = msg.get("payload")
-            if payload_raw:
-                try:
-                    payload = json.loads(payload_raw)
-                except Exception:
-                    payload = {}
-                response, keyboard = dialog.handle_button(peer_id, user_id, payload)
-                vk_client.send_message(peer_id, response, keyboard)
-                continue
+                if peer_id is None or from_id is None or from_id == -settings.vk_group_id:
+                    continue
 
-            response, keyboard = dialog.handle_text(peer_id, user_id, text)
-            vk_client.send_message(peer_id, response, keyboard)
-            continue
+                response_text = None
+                keyboard = None
 
-        if event.type == VkBotEventType.MESSAGE_EVENT:
-            msg_event = event.object
-            if not msg_event:
-                continue
+                # 1. Команды и кнопки
+                if payload or text.lower() in ["/start", "/старт", "старт", "готово", "готово к публикации", "done", "утвердить", "approve", "cancel", "отмена", "birthday", "free", "/auth", "/авторизация", "авторизация", "/check", "/статус", "/status", "/reauth", "/переавторизация"]:
+                    response_text, keyboard = dialog_manager.handle_text(peer_id, from_id, text, payload)
+                
+                # 2. 🔹 СБОР ВЛОЖЕНИЙ С МГНОВЕННЫМ ОТВЕТОМ
+                elif attachments and not text and not payload:
+                    # Сразу говорим пользователю, что бот не завис
+                    send_message(vk_community_api, peer_id, "⏳ Подождите, собираю и загружаю файлы...", None)
+                    
+                    # Добавляем в очередь
+                    dialog_manager.add_to_queue(peer_id, from_id, attachments)
+                    
+                    # Ждем всего 1.5 секунды, чтобы VK успел "дослать" остальные файлы из пачки
+                    time.sleep(1.5)
+                    
+                    # Забираем всё, что накопилось, и обрабатываем
+                    all_attachments = dialog_manager.get_and_clear_queue(peer_id)
+                    if all_attachments:
+                        response_text, keyboard = dialog_manager.handle_attachments(peer_id, from_id, all_attachments)
+                
+                # 3. Смешанное сообщение
+                elif attachments and text:
+                    response_text = "⚠️ Я вижу и текст, и вложение. Пожалуйста, отправьте фото/видео **отдельным сообщением**."
+                    draft = dialog_manager._get_draft(peer_id, from_id)
+                    if draft.status == "awaiting_assets":
+                        keyboard = dialog_manager._make_keyboard_assets()
+                
+                # 4. Обычный текст
+                else:
+                    response_text, keyboard = dialog_manager.handle_text(peer_id, from_id, text, payload)
 
-            peer_id = getattr(msg_event, "peer_id", None)
-            user_id = getattr(msg_event, "user_id", None)
-            event_id = getattr(msg_event, "event_id", None)
-            payload_raw = getattr(msg_event, "payload", None)
+                # Отправляем финальный ответ (если он есть), он заменит или дополнит сообщение "Подождите"
+                if response_text is not None:
+                    try:
+                        send_message(vk_community_api, peer_id, response_text, keyboard)
+                        logger.info(f"Отправлен финальный ответ в peer_id={peer_id}")
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки сообщения: {e}")
 
-            if peer_id is None or user_id is None or event_id is None:
-                continue
+        except requests.exceptions.ReadTimeout:
+            logger.warning("⚠️ Соединение с Long Poll прервалось. Переподключаюсь через 2 сек...")
+            time.sleep(2)
+        except requests.exceptions.ConnectionError:
+            logger.warning("⚠️ Ошибка сети при подключении к Long Poll. Переподключаюсь через 2 сек...")
+            time.sleep(2)
+        except Exception as e:
+            logger.error(f"❌ Неожиданная ошибка в цикле Long Poll: {e}. Переподключаюсь через 5 сек...")
+            time.sleep(5)
 
-            try:
-                payload = json.loads(payload_raw) if payload_raw else {}
-            except Exception:
-                payload = {}
-
-            response, keyboard = dialog.handle_button(peer_id, user_id, payload)
-            vk_client.answer_message_event(event_id, user_id, peer_id, payload)
-            vk_client.send_message(peer_id, response, keyboard)
 
 if __name__ == "__main__":
     main()
