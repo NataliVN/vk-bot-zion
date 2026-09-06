@@ -10,7 +10,6 @@ from vk_api.utils import get_random_id
 
 from app.config import settings
 from app.dialog import DialogManager
-
 from app.database import init_db
 
 logger = logging.getLogger(__name__)
@@ -91,6 +90,13 @@ def main() -> None:
                 if peer_id is None or from_id is None or from_id == -settings.vk_group_id:
                     continue
 
+                # 🔹 ЕДИНАЯ ПРОВЕРКА ДОСТУПА В САМОМ НАЧАЛЕ
+                # Если пользователя нет в ADMIN_USER_IDS, мы сразу прерываем обработку.
+                # Бот ничего не ответит и не будет выполнять никакой логики.
+                if not dialog_manager.is_allowed_user(from_id):
+                    logger.warning(f"⛔ ПОПЫТКА ДОСТУПА: Пользователь {from_id} НЕ в белом списке. Игнорирую сообщение.")
+                    continue
+
                 response_text = None
                 keyboard = None
 
@@ -114,7 +120,7 @@ def main() -> None:
                     if all_attachments:
                         response_text, keyboard = dialog_manager.handle_attachments(peer_id, from_id, all_attachments)
                 
-                # 3. Смешанное сообщение
+                # 3. Смешанное сообщение (и текст, и вложение)
                 elif attachments and text:
                     response_text = "⚠️ Я вижу и текст, и вложение. Пожалуйста, отправьте фото/видео **отдельным сообщением**."
                     draft = dialog_manager._get_draft(peer_id, from_id)
